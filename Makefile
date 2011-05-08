@@ -18,4 +18,4 @@ all: $(PROGS) exe
 #gera o executavel do projeto
 exe: $(OBJETOS) 
 	$(CC) cl.c -o cl
-	$(CC) sv.c -o sv
+	$(CC) sv.c -o sv -l sqlite3

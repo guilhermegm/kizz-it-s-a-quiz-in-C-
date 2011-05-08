@@ -1,5 +1,8 @@
 /*
 ** server.c -- a stream socket server demo
+INSERT INTO Pergunta (pergunta) VALUES("");
+INSERT INTO Alternativa (idPergunta, alternativa, correta) VALUES (1, "", 0);
+SELECT p.idPergunta, p.pergunta, a.alternativa, a.correta FROM Pergunta p, Alternativa a WHERE a.idPergunta = p.idPergunta;
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,8 +16,37 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <sqlite3.h>
+
 #define PORT "3490"  // the port users will be connecting to
 #define BACKLOG 10   // how many pending connections queue will hold
+
+#define NUM_ALTERNATIVAS 4 // Numero de questoes por pergunta
+
+typedef struct _alternativa {
+  unsigned char alternativa[200];
+  int correta;
+  int id;
+  struct _alternativa *prox;
+}Alternativa;
+
+typedef struct _pergunta {
+  unsigned char pergunta[200];
+
+  struct _alternativa *alt;
+  struct _pergunta *prox;
+}Pergunta;
+
+Pergunta *listaPerguntas(Pergunta *ini);
+int inserePergunta(Pergunta *ini, const unsigned char *p);
+int inserePerguntaFinal(Pergunta *ini, const unsigned char *p);
+Pergunta *inserePerguntaInicio(const unsigned char *p);
+Pergunta *novaPergunta(const unsigned char *p);
+int insereAlternativa(Pergunta *pergunta, const unsigned char *p, int correct, int i);
+int insereAlternativaFinal(Alternativa *ini, const unsigned char *p, int correct, int i);
+Alternativa *insereAlternativaInicio(const unsigned char *p, int correct, int i);
+Alternativa *novaAlternativa(const unsigned char *p, int correct, int i);
+Pergunta *getUltimaPergunta(Pergunta *ini);
 
 void sigchld_handler(int s)
 {
@@ -31,6 +63,9 @@ void *get_in_addr(struct sockaddr *sa)
 }
 int main(void)
 {
+
+    Pergunta *listaPergunta;  
+  
     int sockfd, new_fd;  // listen on sock_fd, new connection on new_fd
     struct addrinfo hints, *servinfo, *p;
     struct sockaddr_storage their_addr; // connector's address information
@@ -83,7 +118,34 @@ int main(void)
         perror("sigaction");
         exit(1);
     }
-    printf("server: waiting for connections...\n");
+    
+    
+    listaPergunta = NULL;
+    listaPergunta = listaPerguntas(listaPergunta); //Cria uma lista ligada com todas as perguntas até neste instante no banco de dados
+    Pergunta *aux;
+    Alternativa *altx;
+    for(aux=listaPergunta; aux!=NULL; aux=aux->prox) {
+      printf("%s\n", aux->pergunta);
+      for(altx=aux->alt; altx!=NULL; altx=altx->prox) {
+	printf("%c.[%d] %s\n", altx->id + 'a', altx->correta, altx->alternativa);
+      }
+    }
+    
+    
+   /* ini = malloc(sizeof(Pergunta));
+    ini->perg = sqlite3_column_text(stmt, 1);
+    ini->alt1 = sqlite3_column_text(stmt, 2);
+    retval = sqlite3_step(stmt);
+    ini->alt2 = sqlite3_column_text(stmt, 2);
+    retval = sqlite3_step(stmt);
+    ini->alt3 = sqlite3_column_text(stmt, 2);
+    retval = sqlite3_step(stmt);
+    ini->alt4 = sqlite3_column_text(stmt, 2);
+    
+    
+    printf("%d, %s\n", id, ini->alt4);*/
+    
+    /*printf("server: waiting for connections...\n");
     while(1) {  // main accept() loop
         sin_size = sizeof their_addr;
         new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
@@ -95,14 +157,134 @@ int main(void)
             get_in_addr((struct sockaddr *)&their_addr),
             s, sizeof s);
         printf("server: got connection from %s\n", s);
-        if (!fork()) { // this is the child process
-            close(sockfd); // child doesn't need the listener
-            if (send(new_fd, "Hello, world!", 13, 0) == -1)
-                perror("send");
-            close(new_fd);
-            exit(0);
-        }
-        close(new_fd);  // parent doesn't need this
-    }
+        close(sockfd); // child doesn't need the listener
+        if (send(new_fd, "Hello, world!", 13, 0) == -1) 
+	  perror("send");
+        close(new_fd);
+        exit(0);
+    }*/
     return 0;
+}
+
+//Função que controla a listagem de todas as perguntas e suas devidas alternativas no bando de dados
+//Retorna uma lista ligada de Perguntas
+Pergunta *listaPerguntas(Pergunta *ini) {
+    Pergunta *ultimaPergunta;
+    int retval, row, i;
+    sqlite3 *handle;
+    sqlite3_stmt *stmt;
+    
+    retval = sqlite3_open("kizz.sqlite", &handle);
+    
+    retval = sqlite3_prepare_v2(handle, "SELECT p.idPergunta, p.pergunta, a.alternativa, a.correta FROM Pergunta p, Alternativa a WHERE a.idPergunta = p.idPergunta ORDER BY p.idPergunta;", -1, &stmt, 0);
+    if(retval) {
+      perror("SELECT database");
+      return 0;
+    }
+
+    ini = NULL;
+    i = 0;
+    row = 0;
+    while(1) {
+      retval = sqlite3_step(stmt);
+      
+      if(retval == SQLITE_ROW) {
+	//Processo encarregado de guardar na lista ligada determinada Pergunta e suas Alternativas com a quantidade constante definida por NUM_ALTERNATIVAS 
+	if(i == 0) {
+	  if(ini == NULL) {
+	    //Caso a lista seja NULL insere a pergunta na cabeça da lista
+	    ini = inserePerguntaInicio(sqlite3_column_text(stmt, 1));
+	  } else {
+	    //Caso contrário insere no final da lista
+	    inserePerguntaFinal(ini, sqlite3_column_text(stmt, 1));
+	  }
+	  //Busca a última pergunta adicionada a lista ou seja a pergunta atual
+	  ultimaPergunta = getUltimaPergunta(ini);
+	}
+	//Com a pergunta atual (ultimaPergunta) em mãos, criamos uma lista ligada de alternativas para a pergunta
+	insereAlternativa(ultimaPergunta, sqlite3_column_text(stmt, 2), atoi(sqlite3_column_text(stmt, 3)), i);	
+	i++;
+	if(i == NUM_ALTERNATIVAS) i = 0;
+      }
+      //Caso não haja mais registros a serem lidos ele executará o break;
+      else if(retval == SQLITE_DONE) break;
+      else {
+	perror("SELECT row");
+	return 0;
+      }
+    }
+
+    return ini;
+}
+
+//Função que insere no final da lista ligada das Perguntas, uma pergunta
+int inserePerguntaFinal(Pergunta *ini, const unsigned char *p) {
+  Pergunta *aux = ini;
+  while(aux->prox != NULL) aux = aux->prox;
+  Pergunta *novo = novaPergunta(p);
+  aux->prox = novo;
+  return 1;
+}
+
+//Função que insere no início (cabeça) da lista ligada Perguntas
+//Retorna um ponteiro para a cabeça
+Pergunta *inserePerguntaInicio(const unsigned char *p) {
+  Pergunta *novo = novaPergunta(p);
+  return novo;
+}
+
+//Função responsável por criar um "Nó" para ser colocado na lista ligada das Perguntas
+//Retorna um ponteiro para o Nó criado
+Pergunta *novaPergunta(const unsigned char *p) {
+  Pergunta *novo = malloc(sizeof(Pergunta));
+  strcpy(novo->pergunta, p);
+  novo->alt = NULL;
+  novo->prox = NULL;
+  
+  return novo;
+}
+
+//Função que controla a inserção das alternativas em determina Pergunta
+int insereAlternativa(Pergunta *pergunta, const unsigned char *p, int correct, int i) {
+  if(pergunta->alt == NULL) {
+    pergunta->alt = insereAlternativaInicio(p, correct, i);
+  } else {
+    insereAlternativaFinal(pergunta->alt, p, correct, i);
+  }
+  return 1;
+}
+
+//Função que insere no final da lista ligada das Alternativas, uma alternativa
+int insereAlternativaFinal(Alternativa *ini, const unsigned char *p, int correct, int i) {
+  Alternativa *aux = ini;
+  while(aux->prox != NULL) aux = aux->prox;
+  Alternativa *novo = novaAlternativa(p, correct, i);
+  aux->prox = novo;
+  return 1;
+}
+
+//Função que insere no início (cabeça) da lista ligada das Alternativas
+//Retorna um ponteiro para a cabeça
+Alternativa *insereAlternativaInicio(const unsigned char *p, int correct, int i) {
+  Alternativa *novo = novaAlternativa(p, correct, i);
+  return novo;
+}
+
+//Função responsável por criar um "Nó" para ser colocado na lista ligada das Alternativas
+//Retorna um ponteiro para o Nó criado
+Alternativa *novaAlternativa(const unsigned char *p, int correct, int i) {
+  Alternativa *novo = malloc(sizeof(Alternativa));
+  strcpy(novo->alternativa, p);
+  novo->correta = correct;
+  novo->id = i;
+  novo->prox = NULL;
+  return novo;
+}
+
+//Função responsável por pegar o último Nó de uma lista ligada das Perguntas
+//Retorna um ponteiro para o último nó
+Pergunta *getUltimaPergunta(Pergunta *ini) {
+  Pergunta *aux = ini;
+  while(aux->prox != NULL) aux = aux->prox;
+  return aux;
 }
