@@ -167,15 +167,66 @@ int trataConexao(int sockfd, Pergunta *listaPergunta) {
       ms = telaInical(sockfd);
     else if(ms == 1)
       ms = iniciaJogo(sockfd, listaPergunta);
+    else if(ms == 2)
+      ms = exibeRank(sockfd);
     else if(ms == 3)
       sair = 1;
   }
   return 1;
 }
 
+int exibeRank(int sockfd) {
+    char buf[MAXDATASIZE];
+    int retval, row, i;
+    sqlite3 *handle;
+    sqlite3_stmt *stmt;
+    
+    retval = sqlite3_open("kizz.sqlite", &handle);
+    
+    retval = sqlite3_prepare_v2(handle, "SELECT r.nome, r.pontos FROM Rank r ORDER BY r.pontos;", -1, &stmt, 0);
+    if(retval) {
+      perror("SELECT database");
+      return 0;
+    }
+    
+    i = 0;
+    row = 0;
+    while(1) {
+      retval = sqlite3_step(stmt);
+      
+      if(retval == SQLITE_ROW) {
+	//Processo encarregado de guardar na lista ligada determinada Pergunta e suas Alternativas com a quantidade constante definida por NUM_ALTERNATIVAS 
+	sprintf(buf, "%s\t%s", sqlite3_column_text(stmt, 0), sqlite3_column_text(stmt, 1));
+	send(sockfd, buf, strlen(buf)+1, 0);
+	
+	recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
+      }
+      //Caso não haja mais registros a serem lidos ele executará o break;
+      else if(retval == SQLITE_DONE) break;
+      else {
+	perror("SELECT row");
+	return 0;
+      }
+    }
+    //Fecha conexão
+    sqlite3_close(handle);
+    
+    strcpy(buf, "eor");
+    send(sockfd, buf, strlen(buf)+1, 0);
+    
+    recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
+
+  strcpy(buf, "Nome\tPontos");
+  send(sockfd, buf, strlen(buf)+1, 0);
+  
+  recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
+
+    return 0;
+}
+
 int iniciaJogo(int sockfd, Pergunta *listaPergunta) {
   char buf[MAXDATASIZE];
-  int i, numbytes;
+  int i, numbytes, pontos;
   int num_perg = 3;
   
   //Envia o número de perguntas
@@ -183,10 +234,11 @@ int iniciaJogo(int sockfd, Pergunta *listaPergunta) {
   send(sockfd, buf, strlen(buf)+1, 0);
   
   recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento
-  
+  pontos = 0;
+  Pergunta *p = listaPergunta;
   for(i=0; i<num_perg; i++) {
-    Pergunta *p = sorteiaPergunta(listaPergunta);
-    
+    //Pergunta *p = sorteiaPergunta(listaPergunta);
+
     //Envie o enunciado da pergunta
     strcpy(buf, p->pergunta);
     send(sockfd, buf, strlen(buf)+1, 0);
@@ -198,16 +250,42 @@ int iniciaJogo(int sockfd, Pergunta *listaPergunta) {
     recv(sockfd, buf, MAXDATASIZE, 0);
     if(verificaResposta(p, atoi(buf)-1)) {
       strcpy(buf, "Resposta Correta!");
+      pontos += 19;
     } else {
       strcpy(buf, "Resposta Errada!");
+      pontos -= 17;
     }
     send(sockfd, buf, strlen(buf)+1, 0);
+    
+    p = p->prox;
   }
   
-  //Fim de jogo, mostrar pontos
-  //Perguntar rank (sim, nao), Pedir nome para guardar no Rank
+  recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
+
+  //Envie o enunciado da pergunta
+  sprintf(buf, "Você fez %d pontos.", pontos);
+  send(sockfd, buf, strlen(buf)+1, 0);
+  
+  //Recebe o nome para guardar no banco de dados (Rank)
+  recv(sockfd, buf, MAXDATASIZE, 0);
+  
+  adicionaRank(buf, pontos);
   
   return 0;
+}
+
+int adicionaRank(char *nome, int pontos) {
+  int retval;
+  sqlite3 *handle;
+  char sql[250];
+   
+  retval = sqlite3_open("kizz.sqlite", &handle);
+  
+  sprintf(sql, "INSERT INTO Rank (nome, pontos) VALUES ('%s', %d);", nome, pontos);
+  retval = sqlite3_exec(handle, sql, 0, 0, 0);
+  //Fecha a conexão
+  sqlite3_close(handle);
+  return 1;
 }
 
 int enviaAlternativas(int sockfd, Pergunta *p) {
@@ -257,13 +335,12 @@ int verificaResposta(Pergunta *p, int n) {
 }
 
 Pergunta *sorteiaPergunta(Pergunta *ini) {
-  int i, n, t;
-  Pergunta *aux = ini;
+  int i, n;
+  Pergunta *aux = ini->prox;
   
-  t = listaSize(ini);
-  n = 2;
-  for(i=0; i<n; i++) 
-    aux = aux->prox;
+  //n = random(listaSize(ini));
+  //for(i=0; i<n-1; i++) aux = aux->prox;
+  
   return aux;
 }
 
@@ -271,11 +348,11 @@ int listaSize(Pergunta  *ini) {
   int i;
   Pergunta *aux = ini;
   i = 0;
-  while(aux->prox != NULL) {
+  while(aux != NULL) {
     aux = aux->prox;
     i++;
   }
-  
+
   return i;
 }
 
@@ -331,6 +408,8 @@ Pergunta *listaPerguntas(Pergunta *ini) {
 	return 0;
       }
     }
+    //Fecha conexão
+    sqlite3_close(handle);
 
     return ini;
 }

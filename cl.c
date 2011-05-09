@@ -94,6 +94,8 @@ int trataConexao(int sockfd) {
       ms = telaInicial(sockfd);
     else if(ms == 1)
       ms = iniciaJogo(sockfd);
+    else if(ms == 2)
+      ms = exibeRank(sockfd);
     else if(ms == 3)
       sair = 1;
     else
@@ -102,6 +104,32 @@ int trataConexao(int sockfd) {
   
   close(sockfd);
   return 1;
+}
+
+int exibeRank(int sockfd) {
+  char buf[MAXDATASIZE];
+  
+  printf("\n\n");
+  while(1) {
+    recv(sockfd, buf, MAXDATASIZE, 0);
+    
+    if(strcmp(buf, "eor") == 0) break;
+    printf("%s\n", buf);
+    
+    strcpy(buf, NP); 
+    send(sockfd, buf, strlen(buf)+1, 0); //Confirmação/Espera de recebimento (No Problem)
+  }
+  
+  strcpy(buf, NP); 
+  send(sockfd, buf, strlen(buf)+1, 0); //Confirmação/Espera de recebimento (No Problem)  
+
+  recv(sockfd, buf, MAXDATASIZE, 0);
+  printf("%s\n\n", buf);
+  
+  strcpy(buf, NP); 
+  send(sockfd, buf, strlen(buf)+1, 0); //Confirmação/Espera de recebimento (No Problem)
+  
+  return 0;
 }
 
 int iniciaJogo(int sockfd) {
@@ -124,10 +152,7 @@ int iniciaJogo(int sockfd) {
     send(sockfd, buf, strlen(buf)+1, 0); //Confirmação/Espera de recebimento (No Problem)
     
     recebeAlternativas(sockfd);
-    //printf("ae");
-    //recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
 
-    //scanf("%s", buf);
     //Recebe e envia a resposta da pergunta
     printf("\nDigite o número da resposta:\n");
     scanf("%s", buf);
@@ -136,7 +161,18 @@ int iniciaJogo(int sockfd) {
     recv(sockfd, buf, MAXDATASIZE, 0);
     printf("%s", buf);
   }
-  printf("\n\nFim de jogo!\n\n");
+  
+  strcpy(buf, NP);
+  send(sockfd, buf, strlen(buf)+1, 0); //Confirmação/Espera de recebimento (No Problem)
+
+  recv(sockfd, buf, MAXDATASIZE, 0);
+  printf("\n\n%s\nDigite seu nome: ", buf);
+  scanf("%s", buf);
+  //Envia o nome 
+  send(sockfd, buf, strlen(buf)+1, 0);
+  
+  printf("\nFim de jogo!\n\n");
+  
   return 0;
 }
 
