@@ -22,6 +22,8 @@ SELECT p.idPergunta, p.pergunta, a.alternativa, a.correta FROM Pergunta p, Alter
 #define BACKLOG 10   // how many pending connections queue will hold
 
 #define NUM_ALTERNATIVAS 4 // Numero de questoes por pergunta
+#define MAXDATASIZE 200
+#define NP "200 OK"
 
 typedef struct _alternativa {
   unsigned char alternativa[200];
@@ -47,6 +49,14 @@ int insereAlternativaFinal(Alternativa *ini, const unsigned char *p, int correct
 Alternativa *insereAlternativaInicio(const unsigned char *p, int correct, int i);
 Alternativa *novaAlternativa(const unsigned char *p, int correct, int i);
 Pergunta *getUltimaPergunta(Pergunta *ini);
+int trataConexao(int sockfd, Pergunta *listaPergunta);
+int iniciaJogo(int sockfd, Pergunta *listaPergunta);
+int verificaResposta(Pergunta *p, int c);
+int enviaAlternativas(int sockfd, Pergunta *p);
+Pergunta *sorteiaPergunta(Pergunta *ini);
+int listaSize(Pergunta  *ini);
+int telaInical(int sockfd);
+int charToint(char c);
 
 void sigchld_handler(int s)
 {
@@ -61,9 +71,7 @@ void *get_in_addr(struct sockaddr *sa)
     }
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
-int main(void)
-{
-
+int main(void) {
     Pergunta *listaPergunta;  
   
     int sockfd, new_fd;  // listen on sock_fd, new connection on new_fd
@@ -122,49 +130,159 @@ int main(void)
     
     listaPergunta = NULL;
     listaPergunta = listaPerguntas(listaPergunta); //Cria uma lista ligada com todas as perguntas até neste instante no banco de dados
-    Pergunta *aux;
+    /*Pergunta *aux;
     Alternativa *altx;
     for(aux=listaPergunta; aux!=NULL; aux=aux->prox) {
       printf("%s\n", aux->pergunta);
       for(altx=aux->alt; altx!=NULL; altx=altx->prox) {
 	printf("%c.[%d] %s\n", altx->id + 'a', altx->correta, altx->alternativa);
       }
-    }
+    }*/
     
-    
-   /* ini = malloc(sizeof(Pergunta));
-    ini->perg = sqlite3_column_text(stmt, 1);
-    ini->alt1 = sqlite3_column_text(stmt, 2);
-    retval = sqlite3_step(stmt);
-    ini->alt2 = sqlite3_column_text(stmt, 2);
-    retval = sqlite3_step(stmt);
-    ini->alt3 = sqlite3_column_text(stmt, 2);
-    retval = sqlite3_step(stmt);
-    ini->alt4 = sqlite3_column_text(stmt, 2);
-    
-    
-    printf("%d, %s\n", id, ini->alt4);*/
-    
-    /*printf("server: waiting for connections...\n");
-    while(1) {  // main accept() loop
+    printf("server: waiting for connections...\n");
         sin_size = sizeof their_addr;
         new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
         if (new_fd == -1) {
             perror("accept");
-            continue;
+            exit(1);
         }
         inet_ntop(their_addr.ss_family,
             get_in_addr((struct sockaddr *)&their_addr),
             s, sizeof s);
         printf("server: got connection from %s\n", s);
-        close(sockfd); // child doesn't need the listener
-        if (send(new_fd, "Hello, world!", 13, 0) == -1) 
-	  perror("send");
-        close(new_fd);
-        exit(0);
-    }*/
+            close(sockfd); // child doesn't need the listener
+	    trataConexao(new_fd, listaPergunta);
+	    close(new_fd);
     return 0;
 }
+
+// 0 - Tela Inicial // 1 - Jogar // 2 - Rank // 3 - Sair
+int trataConexao(int sockfd, Pergunta *listaPergunta) {
+  int ms, sair;
+
+  sair = 0;
+  ms = 0;
+  while(!sair){
+    if(ms == 0)
+      ms = telaInical(sockfd);
+    else if(ms == 1)
+      ms = iniciaJogo(sockfd, listaPergunta);
+    else if(ms == 3)
+      sair = 1;
+  }
+  return 1;
+}
+
+int iniciaJogo(int sockfd, Pergunta *listaPergunta) {
+  char buf[MAXDATASIZE];
+  int i, numbytes;
+  int num_perg = 3;
+  
+  //Envia o número de perguntas
+  strcpy(buf, "3");
+  send(sockfd, buf, strlen(buf)+1, 0);
+  
+  recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento
+  
+  for(i=0; i<num_perg; i++) {
+    Pergunta *p = sorteiaPergunta(listaPergunta);
+    
+    //Envie o enunciado da pergunta
+    strcpy(buf, p->pergunta);
+    send(sockfd, buf, strlen(buf)+1, 0);
+
+    recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
+
+    enviaAlternativas(sockfd, p);
+    
+    recv(sockfd, buf, MAXDATASIZE, 0);
+    if(verificaResposta(p, atoi(buf)-1)) {
+      strcpy(buf, "Resposta Correta!");
+    } else {
+      strcpy(buf, "Resposta Errada!");
+    }
+    send(sockfd, buf, strlen(buf)+1, 0);
+  }
+  
+  //Fim de jogo, mostrar pontos
+  //Perguntar rank (sim, nao), Pedir nome para guardar no Rank
+  
+  return 0;
+}
+
+int enviaAlternativas(int sockfd, Pergunta *p) {
+  char buf[MAXDATASIZE];
+  Alternativa *aux = p->alt;
+
+  while(aux != NULL) {
+    //Envia a alternativa da pergunta
+    strcpy(buf, aux->alternativa);
+    
+    send(sockfd, buf, strlen(buf)+1, 0);
+    
+    recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
+    
+    aux = aux->prox;
+  }
+  
+  //End of Alternativas
+  strcpy(buf, "eoa");
+  send(sockfd, buf, strlen(buf)+1, 0);
+  
+  recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
+  
+  return 1;
+}
+
+int telaInical(int sockfd) {
+  char buf[MAXDATASIZE];
+  int numbytes;
+  
+  strcpy(buf, "KUIZZ\n\n1) Jogar\n2) Rank\n3) Sair");
+  
+  send(sockfd, buf, strlen(buf)+1, 0);
+  recv(sockfd, buf, MAXDATASIZE, 0);
+
+  return atoi(buf);
+}
+
+int verificaResposta(Pergunta *p, int n) {
+  Alternativa *aux = p->alt;
+  int i;
+  
+  for(i=0; i<n; i++)
+    aux = aux->prox;
+  
+  return aux->correta;
+}
+
+Pergunta *sorteiaPergunta(Pergunta *ini) {
+  int i, n, t;
+  Pergunta *aux = ini;
+  
+  t = listaSize(ini);
+  n = 2;
+  for(i=0; i<n; i++) 
+    aux = aux->prox;
+  return aux;
+}
+
+int listaSize(Pergunta  *ini) {
+  int i;
+  Pergunta *aux = ini;
+  i = 0;
+  while(aux->prox != NULL) {
+    aux = aux->prox;
+    i++;
+  }
+  
+  return i;
+}
+
+int charToint(char c) {
+  return c - 'a';
+}
+
 
 //Função que controla a listagem de todas as perguntas e suas devidas alternativas no bando de dados
 //Retorna uma lista ligada de Perguntas
