@@ -139,7 +139,7 @@ int main(void) {
       }
     }*/
     
-    printf("server: waiting for connections...\n");
+   /* printf("server: waiting for connections...\n");
         sin_size = sizeof their_addr;
         new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
         if (new_fd == -1) {
@@ -152,7 +152,31 @@ int main(void) {
         printf("server: got connection from %s\n", s);
             close(sockfd); // child doesn't need the listener
 	    trataConexao(new_fd, listaPergunta);
-	    close(new_fd);
+	    close(new_fd);*/
+   
+   
+   printf("server: waiting for connections...\n");
+    while(1) {  // main accept() loop
+        sin_size = sizeof their_addr;
+        new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
+        if (new_fd == -1) {
+            perror("accept");
+            continue;
+        }
+        inet_ntop(their_addr.ss_family,
+            get_in_addr((struct sockaddr *)&their_addr),
+            s, sizeof s);
+        printf("server: got connection from %s\n", s);
+        if (!fork()) { // this is the child process
+            close(sockfd); // child doesn't need the listener
+            if (trataConexao(new_fd, listaPergunta) == -1)
+                perror("send");
+            printf("server: lost connection from %s\n", s);
+            close(new_fd);
+            exit(0);
+        }
+        close(new_fd);  // parent doesn't need this
+    }
     return 0;
 }
 
@@ -227,17 +251,18 @@ int exibeRank(int sockfd) {
 int iniciaJogo(int sockfd, Pergunta *listaPergunta) {
   char buf[MAXDATASIZE];
   int i, numbytes, pontos;
-  int num_perg = 3;
-  
+  int num_perg = 5;
+  char str[10];
   //Envia o número de perguntas
-  strcpy(buf, "3");
+  //strcpy(buf, "3");
+  sprintf(buf, "%i\0", num_perg); 
   send(sockfd, buf, strlen(buf)+1, 0);
   
   recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento
   pontos = 0;
   Pergunta *p = listaPergunta;
   for(i=0; i<num_perg; i++) {
-    //Pergunta *p = sorteiaPergunta(listaPergunta);
+    Pergunta *p = sorteiaPergunta(listaPergunta);
 
     //Envie o enunciado da pergunta
     strcpy(buf, p->pergunta);
@@ -257,7 +282,7 @@ int iniciaJogo(int sockfd, Pergunta *listaPergunta) {
     }
     send(sockfd, buf, strlen(buf)+1, 0);
     
-    p = p->prox;
+    //p = p->prox;
   }
   
   recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
@@ -338,10 +363,16 @@ Pergunta *sorteiaPergunta(Pergunta *ini) {
   int i, n;
   Pergunta *aux = ini->prox;
   
-  //n = random(listaSize(ini));
-  //for(i=0; i<n-1; i++) aux = aux->prox;
+  n = randomN(listaSize(ini));
+  for(i=0; i<n-1; i++) aux = aux->prox;
   
   return aux;
+}
+
+//Gera um número aleatório de 1 até N
+int randomN(int n) {
+  int r = random()/(RAND_MAX / n);
+  return r;
 }
 
 int listaSize(Pergunta  *ini) {
