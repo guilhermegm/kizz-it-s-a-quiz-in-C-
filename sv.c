@@ -17,13 +17,26 @@ SELECT p.idPergunta, p.pergunta, a.alternativa, a.correta FROM Pergunta p, Alter
 #include <sys/wait.h>
 #include <signal.h>
 #include <sqlite3.h>
+#include <sys/time.h>
+#include <sys/types.h>
 
 #define PORT "3490"  // the port users will be connecting to
 #define BACKLOG 10   // how many pending connections queue will hold
 
 #define NUM_ALTERNATIVAS 4 // Numero de questoes por pergunta
-#define MAXDATASIZE 200
+#define MAXDATASIZE 1200
 #define NP "200 OK"
+#define NUM_THREADS 100000
+#define MAX_SALA_JOGO 100
+
+#define TELA_INICIAL 1
+#define SELECIONA_JOGO 2
+#define RANK 3
+#define SAIR 4
+
+#define JOGAR_2 5
+#define JOGAR_4 6
+#define JOGAR_8 7
 
 typedef struct _alternativa {
   unsigned char alternativa[200];
@@ -39,6 +52,33 @@ typedef struct _pergunta {
   struct _pergunta *prox;
 }Pergunta;
 
+typedef struct _conexao {
+  pthread_t tcon; //thread da conexão
+  int sid;        //socket id
+  int estado;     //Maquina de Estados
+  int pontos;
+  struct _conexao *prox;
+}Conexao;
+
+typedef struct _salaJogo {
+  pthread_t tsala;
+  int receiv;
+  int jogoFim;
+  int sidResp;
+  struct _pergunta *perg;
+  struct _conexao *con1;
+  int con1Resp;
+  struct _conexao *con2;
+  int con2Resp;
+  struct _salaJogo *prox;
+}SalaJogo;
+
+Pergunta *listaPergunta; 
+Conexao *listaConexao;
+SalaJogo *salaJogo2;
+SalaJogo *listaJogo4;
+SalaJogo *listaJogo8;
+
 Pergunta *listaPerguntas(Pergunta *ini);
 int inserePergunta(Pergunta *ini, const unsigned char *p);
 int inserePerguntaFinal(Pergunta *ini, const unsigned char *p);
@@ -49,14 +89,18 @@ int insereAlternativaFinal(Alternativa *ini, const unsigned char *p, int correct
 Alternativa *insereAlternativaInicio(const unsigned char *p, int correct, int i);
 Alternativa *novaAlternativa(const unsigned char *p, int correct, int i);
 Pergunta *getUltimaPergunta(Pergunta *ini);
-int trataConexao(int sockfd, Pergunta *listaPergunta);
-int iniciaJogo(int sockfd, Pergunta *listaPergunta);
-int verificaResposta(Pergunta *p, int c);
-int enviaAlternativas(int sockfd, Pergunta *p);
+void *trataConexao(void *targs);
 Pergunta *sorteiaPergunta(Pergunta *ini);
-int listaSize(Pergunta  *ini);
-int telaInical(int sockfd);
-int charToint(char c);
+Conexao *novaConexao(int sid, int estado);
+Conexao *insereConexaoInicio(int sid, int estado);
+Conexao *insereConexaoFinal(Conexao *ini, int sid, int estado);
+SalaJogo *insereSalaJogoInicio(Conexao *con);
+SalaJogo *novaSalaJogo(Conexao *con);
+SalaJogo *getUltimaSalaJogo();
+void *gerenciaSalaJogo(void *t);
+Pergunta *selecionaPerguntas();
+void *controlaJogo1(void *tsalaJogo);
+void *controlaJogo2(void *tsalaJogo);
 
 void sigchld_handler(int s)
 {
@@ -72,8 +116,6 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 int main(void) {
-    Pergunta *listaPergunta;  
-  
     int sockfd, new_fd;  // listen on sock_fd, new connection on new_fd
     struct addrinfo hints, *servinfo, *p;
     struct sockaddr_storage their_addr; // connector's address information
@@ -128,35 +170,19 @@ int main(void) {
     }
     
     
-    listaPergunta = NULL;
-    listaPergunta = listaPerguntas(listaPergunta); //Cria uma lista ligada com todas as perguntas até neste instante no banco de dados
-    /*Pergunta *aux;
-    Alternativa *altx;
-    for(aux=listaPergunta; aux!=NULL; aux=aux->prox) {
-      printf("%s\n", aux->pergunta);
-      for(altx=aux->alt; altx!=NULL; altx=altx->prox) {
-	printf("%c.[%d] %s\n", altx->id + 'a', altx->correta, altx->alternativa);
-      }
-    }*/
-    
-   /* printf("server: waiting for connections...\n");
-        sin_size = sizeof their_addr;
-        new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
-        if (new_fd == -1) {
-            perror("accept");
-            exit(1);
-        }
-        inet_ntop(their_addr.ss_family,
-            get_in_addr((struct sockaddr *)&their_addr),
-            s, sizeof s);
-        printf("server: got connection from %s\n", s);
-            close(sockfd); // child doesn't need the listener
-	    trataConexao(new_fd, listaPergunta);
-	    close(new_fd);*/
+   listaPergunta = NULL;
+   listaPergunta = listaPerguntas(listaPergunta); //Cria uma lista ligada com todas as perguntas até neste instante no banco de dados
+   listaConexao = NULL;
    
+   salaJogo2 = NULL;
+
+   int rc;
    
+   rc = 0;
    printf("server: waiting for connections...\n");
     while(1) {  // main accept() loop
+	Conexao *con = NULL;
+	
         sin_size = sizeof their_addr;
         new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
         if (new_fd == -1) {
@@ -167,36 +193,422 @@ int main(void) {
             get_in_addr((struct sockaddr *)&their_addr),
             s, sizeof s);
         printf("server: got connection from %s\n", s);
-        if (!fork()) { // this is the child process
-            close(sockfd); // child doesn't need the listener
-            if (trataConexao(new_fd, listaPergunta) == -1)
-                perror("send");
-            printf("server: lost connection from %s\n", s);
-            close(new_fd);
-            exit(0);
-        }
-        close(new_fd);  // parent doesn't need this
+	
+	if(listaConexao == NULL) {
+          listaConexao = insereConexaoInicio(new_fd, TELA_INICIAL);
+	  con = listaConexao;
+	} else {
+	  con = insereConexaoFinal(listaConexao, new_fd, TELA_INICIAL);
+	}
+
+	rc = pthread_create(&con->tcon, NULL, trataConexao, (void *)con);		
     }
     return 0;
 }
 
 // 0 - Tela Inicial // 1 - Jogar // 2 - Rank // 3 - Sair
-int trataConexao(int sockfd, Pergunta *listaPergunta) {
-  int ms, sair;
+void *trataConexao(void *tcon) {
+  Conexao *con = (Conexao *)tcon;
+  int sair, receiv;
+  char buf[MAXDATASIZE];
 
+  
+  telas(con);
+  
+  //printf("XDDD, %d, %d!\n", con->sid, con->estado);
+
+  //sleep(1);
+
+  /*
   sair = 0;
   ms = 0;
   while(!sair){
     if(ms == 0)
       ms = telaInical(sockfd);
     else if(ms == 1)
-      ms = iniciaJogo(sockfd, listaPergunta);
+      ms = iniciaJogo(sockfd);
     else if(ms == 2)
       ms = exibeRank(sockfd);
     else if(ms == 3)
       sair = 1;
+  }*/
+  printf("conct closed");
+  fflush(stdout);
+  
+  pthread_exit(NULL);
+  close(con->sid);
+}
+
+int telas(Conexao *con) {
+  char buf[MAXDATASIZE];
+  int receiv;
+  
+  while(1) {
+    if(con->estado == TELA_INICIAL) {
+      telaInical(con);
+      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
+      proximoEstado(con, atoi(buf));
+    }
+    else if(con->estado == SELECIONA_JOGO) {
+      selecionaJogo(con);
+      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
+      proximoEstado(con, atoi(buf));
+    }
+    else if(con->estado == JOGAR_2) {  
+      iniciaJogo2(con);
+      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
+      proximoEstado(con, atoi(buf));
+    }
+    /*else if(con->estado == JOGAR_4) {  
+      iniciaJogo2(con);
+      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
+      proximoEstado(con, atoi(buf));
+    }
+    else if(con->estado == JOGAR_8) {  
+      iniciaJogo2(con);
+      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
+      proximoEstado(con, atoi(buf));
+    }*/
+    else if(con->estado == SAIR) {
+      sprintf(buf, "%d", SAIR);
+      send(con->sid, buf, strlen(buf)+1, 0);
+      break;
+    }
   }
-  return 1;
+  
+  return 0;
+}
+
+int proximoEstado(Conexao *con, int proxEstado) {
+  if(con->estado == TELA_INICIAL) {
+    if(proxEstado == 1)
+      con->estado = SELECIONA_JOGO;
+    else if(proxEstado == 2)
+      con->estado = RANK;
+    else if(proxEstado == 3)
+      con->estado = SAIR;    
+  }
+  else if(con->estado == SELECIONA_JOGO) {
+    if(proxEstado == 1)
+      con->estado = JOGAR_2;
+    else if(proxEstado == 2)
+      con->estado = JOGAR_4;
+    else if(proxEstado == 3)
+      con->estado = JOGAR_8;          
+  }
+  
+  return 0;
+}
+
+/*****************************
+************ JOGO ************
+******************************/
+int iniciaJogo2(Conexao *con) {
+  char buf[MAXDATASIZE];
+  int i, numbytes, pontos, rc;
+  int numJogadores = 2;
+  int num_perg = 5;
+  char str[10];
+  SalaJogo *aux;
+  
+  sprintf(buf, "%d", JOGAR_2);
+  numbytes = send(con->sid, buf, strlen(buf)+1, 0);
+  
+  if(verificaSalaJogo(con, numJogadores) == -1) {
+    criaSalaJogo(con, numJogadores);
+    aux = getUltimaSalaJogo();
+    rc = pthread_create(&aux->tsala, NULL, gerenciaSalaJogo, (void *)aux);
+  }
+
+  pthread_exit(NULL);
+  
+  return 0;
+}
+
+void *gerenciaSalaJogo(void *tsalaJogo) {
+  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
+  Pergunta *perguntas = selecionaPerguntas();
+  char buf[MAXDATASIZE];
+  
+  aguardaJogadores(salaJogo);
+  enviarPerguntas(salaJogo, perguntas);
+  
+  pthread_exit(NULL);
+}
+
+int enviarPerguntas(SalaJogo *salaJogo, Pergunta *perguntas) {
+  salaJogo->perg = perguntas;
+  Pergunta *p = salaJogo->perg;
+  char buf[MAXDATASIZE];
+  pthread_t con1, con2;
+  int receiv, ctlCon, rc;
+
+  receiv = verificaRecebimento(salaJogo); //Msg de controle para estabelecer sincronização entre as conexões na Sala
+
+  salaJogo->receiv = 0;
+  salaJogo->jogoFim = 0;
+  rc = pthread_create(&con1, NULL, controlaJogo1, (void *)salaJogo);
+  rc = pthread_create(&con2, NULL, controlaJogo2, (void *)salaJogo);
+  
+  while(p != NULL) {
+    sleep(1);
+    //Envie o enunciado da pergunta
+    sprintf(buf, "\n%s\n\n", p->pergunta);
+    enviaMsgSalaJogo(salaJogo, buf);
+  
+    //receiv = verificaRecebimento(salaJogo);
+    sleep(1);
+  
+    enviaAlternativas(salaJogo, p);
+    
+    //Recebe resposta
+    //receiv = verificaRecebimento(salaJogo, buf);
+    //sockReceiv = recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0);
+    salaJogo->con1Resp = 0;
+    salaJogo->con2Resp = 0;
+    salaJogo->receiv = 1;
+    salaJogo->sidResp = 0;
+    while(salaJogo->sidResp == 0) sleep(1);
+    if(salaJogo->sidResp != 0) adicinaPonto(salaJogo);
+    printf("respondu!!\n");
+    
+    salaJogo->receiv = 0;
+    salaJogo->sidResp = 0;
+    
+    p = p->prox;
+    salaJogo->perg = p;
+  }
+  enviaMsgSalaJogo(salaJogo, "eog"); //End of Game
+  
+  pthread_exit(NULL);
+  pthread_exit(NULL);
+}
+
+void *controlaJogo1(void *tsalaJogo) {  
+  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
+  char buf[MAXDATASIZE];
+  printf("con: 1\n");
+  fflush(stdout);
+  while(!salaJogo->jogoFim) {
+    if(salaJogo->receiv) {
+      //Recebe a resposta da Pergunta
+      recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0);
+      printf("2sid: %d, resp: %s\n", salaJogo->con1->sid, buf);
+      fflush(stdout);
+      
+      if(!salaJogo->con1Resp && strcmp(buf, "") != 0) {
+        if(salaJogo->sidResp == 0 && !verificaResposta(salaJogo->perg, atoi(buf)-1)) {
+	  salaJogo->sidResp = 1;
+          strcpy(buf, "\nResposta Correta!\n\n");
+        } 
+        else strcpy(buf, "\nResposta Errada!\n\n");
+        send(salaJogo->con1->sid, buf, strlen(buf)+1, 0);
+	salaJogo->con1Resp = 1;
+	printf("(sidr: %d)\n", salaJogo->sidResp);
+	fflush(stdout);
+      }
+      sleep(1);
+    }
+  }
+  pthread_exit(NULL);
+}
+
+void *controlaJogo2(void *tsalaJogo) {  
+  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
+  char buf[MAXDATASIZE];
+  printf("con: 2\n");
+  fflush(stdout);
+  while(!salaJogo->jogoFim) {
+    if(salaJogo->receiv) {
+      //Recebe a resposta da Pergunta
+      recv(salaJogo->con2->sid, buf, MAXDATASIZE, 0);
+      printf("4sid: %d, resp: %s\n", salaJogo->con2->sid, buf);
+      fflush(stdout);
+      
+      if(!salaJogo->con2Resp && strcmp(buf, "") != 0) {
+        if(salaJogo->sidResp == 0 && !verificaResposta(salaJogo->perg, atoi(buf)-1)) {
+	  salaJogo->sidResp = 2;
+          strcpy(buf, "\n\nResposta Correta!\n\n");
+        } 
+        else strcpy(buf, "\n\nResposta Errada!\n\n");
+	send(salaJogo->con2->sid, buf, strlen(buf)+1, 0);
+	salaJogo->con2Resp = 1;
+	printf("(sidr: %d)\n", salaJogo->sidResp);
+	fflush(stdout);
+      }
+      sleep(1);
+    }
+  }
+  pthread_exit(NULL);
+}
+
+int adicinaPonto(SalaJogo *salaJogo) {
+  if(salaJogo->sidResp == 1)
+    salaJogo->con1->pontos += 15;
+  else if(salaJogo->sidResp == 2)
+    salaJogo->con2->pontos += 15;
+
+  return 0;
+}
+
+int verificaRecebimento(SalaJogo *salaJogo) {
+  char buf[MAXDATASIZE];
+  int i = 0;
+  
+  while(1) {
+    if(recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0) != -1)
+      i++;
+    if(recv(salaJogo->con2->sid, buf, MAXDATASIZE, 0) != -1)
+      i++;
+    if(i == 2)
+      break;
+      
+    sleep(1);
+  }
+  
+  return 0;
+}
+
+int enviaAlternativas(SalaJogo *salaJogo, Pergunta *p) {
+  int i = 'A';
+  char buf[MAXDATASIZE];
+  Alternativa *aux = p->alt;
+
+  //Envia a alternativa da pergunta
+  sprintf(buf, "A) %s\nB) %s\nC) %s\nD) %s\n", aux->alternativa, aux->prox->alternativa, aux->prox->prox->alternativa, aux->prox->prox->prox->alternativa);
+  enviaMsgSalaJogo(salaJogo, buf);
+
+  return 0;
+}
+
+Pergunta *selecionaPerguntas() {
+  Pergunta *p = listaPergunta;
+  return p;
+}
+
+int aguardaJogadores(SalaJogo *salaJogo) {
+  char buf[MAXDATASIZE];
+  int i, j;
+
+  j = 0;
+  while(1) {
+    i = numJogadoresSalaJogo(salaJogo);
+    sprintf(buf, "Aguardando jogadores! [%d/2]\n", i);
+    
+    if(j != i) {
+      enviaMsgSalaJogo(salaJogo, buf);
+      j = i;
+    }
+    
+    sleep(1);
+    if(i == 2)
+      break;
+  }
+  strcpy(buf, NP);
+  enviaMsgSalaJogo(salaJogo, buf);
+
+  return 0;
+}
+
+int enviaMsgSalaJogo(SalaJogo *salaJogo, char msg[MAXDATASIZE]) {
+  if(salaJogo->con1 != NULL)
+    send(salaJogo->con1->sid, msg, strlen(msg)+1, 0);
+  if(salaJogo->con2 != NULL)
+    send(salaJogo->con2->sid, msg, strlen(msg)+1, 0);
+  
+  return 0;
+}
+
+int numJogadoresSalaJogo(SalaJogo *salaJogo) {
+  int i = 0;
+  if(salaJogo->con1 != NULL)
+    i++;
+  if(salaJogo->con2 != NULL)
+    i++;
+  return i;
+}
+
+int verificaSalaJogo(Conexao *con, int numJogadores) {
+  SalaJogo *salaAux = salaJogo2;
+  int i;
+
+  if(numJogadores == 2) {
+    while(salaAux != NULL) {
+      if(salaAux->con2 == NULL) {
+	salaAux->con2 = con;
+	return 0;
+      }
+      salaAux = salaAux->prox;
+    }
+  }
+  return -1;
+}
+
+int criaSalaJogo(Conexao *con, int numJogadores) {
+  if(salaJogo2 == NULL) {
+    salaJogo2 = insereSalaJogoInicio(con);
+  } else {
+    insereSalaJogoFinal(salaJogo2, con);
+  }
+  
+  return 0;
+}
+
+SalaJogo *getUltimaSalaJogo() {
+  SalaJogo *aux = salaJogo2;
+  while(aux->prox != NULL) aux = aux->prox;
+  return aux;
+}
+
+//Função que insere no final da lista ligada das Perguntas, uma pergunta
+int insereSalaJogoFinal(SalaJogo *ini, Conexao *con) {
+  SalaJogo *aux = ini;
+  while(aux->prox != NULL) aux = aux->prox;
+  SalaJogo *novo = novaSalaJogo(con);
+  aux->prox = novo;
+  
+  return 0;
+}
+
+//Função que insere no início (cabeça) da lista ligada Perguntas
+//Retorna um ponteiro para a cabeça
+SalaJogo *insereSalaJogoInicio(Conexao *con) {
+  SalaJogo *novo = novaSalaJogo(con);
+  return novo;
+}
+
+//Função responsável por criar um "Nó" para ser colocado na lista ligada das Perguntas
+//Retorna um ponteiro para o Nó criado
+SalaJogo *novaSalaJogo(Conexao *con) {
+  SalaJogo *novo = malloc(sizeof(SalaJogo));
+  novo->con1 = con;
+  novo->con2 = NULL;
+  novo->prox = NULL;
+  
+  return novo;
+}
+
+/*****************************
+************ TELA ************
+******************************/
+int telaInical(Conexao *con) {
+  char buf[MAXDATASIZE];
+  int numbytes;
+  
+  sprintf(buf, "%d", TELA_INICIAL);
+  numbytes = send(con->sid, buf, strlen(buf)+1, 0);
+
+  return 0;
+}
+
+int selecionaJogo(Conexao *con) {
+  char buf[MAXDATASIZE];
+  int numbytes;
+  
+  sprintf(buf, "%d", SELECIONA_JOGO);
+  numbytes = send(con->sid, buf, strlen(buf)+1, 0);
+
+  return 0;  
 }
 
 int exibeRank(int sockfd) {
@@ -240,64 +652,14 @@ int exibeRank(int sockfd) {
     
     recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
 
-  strcpy(buf, "Nome\tPontos");
-  send(sockfd, buf, strlen(buf)+1, 0);
+    strcpy(buf, "Nome\tPontos");
+    send(sockfd, buf, strlen(buf)+1, 0);
   
   recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
 
     return 0;
 }
 
-int iniciaJogo(int sockfd, Pergunta *listaPergunta) {
-  char buf[MAXDATASIZE];
-  int i, numbytes, pontos;
-  int num_perg = 5;
-  char str[10];
-  //Envia o número de perguntas
-  //strcpy(buf, "3");
-  sprintf(buf, "%i\0", num_perg); 
-  send(sockfd, buf, strlen(buf)+1, 0);
-  
-  recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento
-  pontos = 0;
-  Pergunta *p = listaPergunta;
-  for(i=0; i<num_perg; i++) {
-    Pergunta *p = sorteiaPergunta(listaPergunta);
-
-    //Envie o enunciado da pergunta
-    strcpy(buf, p->pergunta);
-    send(sockfd, buf, strlen(buf)+1, 0);
-
-    recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
-
-    enviaAlternativas(sockfd, p);
-    
-    recv(sockfd, buf, MAXDATASIZE, 0);
-    if(verificaResposta(p, atoi(buf)-1)) {
-      strcpy(buf, "Resposta Correta!");
-      pontos += 19;
-    } else {
-      strcpy(buf, "Resposta Errada!");
-      pontos -= 17;
-    }
-    send(sockfd, buf, strlen(buf)+1, 0);
-    
-    //p = p->prox;
-  }
-  
-  recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
-
-  //Envie o enunciado da pergunta
-  sprintf(buf, "Você fez %d pontos.", pontos);
-  send(sockfd, buf, strlen(buf)+1, 0);
-  
-  //Recebe o nome para guardar no banco de dados (Rank)
-  recv(sockfd, buf, MAXDATASIZE, 0);
-  
-  adicionaRank(buf, pontos);
-  
-  return 0;
-}
 
 int adicionaRank(char *nome, int pontos) {
   int retval;
@@ -311,42 +673,6 @@ int adicionaRank(char *nome, int pontos) {
   //Fecha a conexão
   sqlite3_close(handle);
   return 1;
-}
-
-int enviaAlternativas(int sockfd, Pergunta *p) {
-  char buf[MAXDATASIZE];
-  Alternativa *aux = p->alt;
-
-  while(aux != NULL) {
-    //Envia a alternativa da pergunta
-    strcpy(buf, aux->alternativa);
-    
-    send(sockfd, buf, strlen(buf)+1, 0);
-    
-    recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
-    
-    aux = aux->prox;
-  }
-  
-  //End of Alternativas
-  strcpy(buf, "eoa");
-  send(sockfd, buf, strlen(buf)+1, 0);
-  
-  recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
-  
-  return 1;
-}
-
-int telaInical(int sockfd) {
-  char buf[MAXDATASIZE];
-  int numbytes;
-  
-  strcpy(buf, "KUIZZ\n\n1) Jogar\n2) Rank\n3) Sair");
-  
-  send(sockfd, buf, strlen(buf)+1, 0);
-  recv(sockfd, buf, MAXDATASIZE, 0);
-
-  return atoi(buf);
 }
 
 int verificaResposta(Pergunta *p, int n) {
@@ -369,7 +695,8 @@ Pergunta *sorteiaPergunta(Pergunta *ini) {
   return aux;
 }
 
-//Gera um número aleatório de 1 até N
+//Gera um número aleatório de 0 até N
+//Autor: Guilherme G Moreira
 int randomN(int n) {
   int r = random()/(RAND_MAX / n);
   return r;
@@ -445,6 +772,34 @@ Pergunta *listaPerguntas(Pergunta *ini) {
     return ini;
 }
 
+//Função que insere no final da lista ligada das Conexao, uma pergunta
+Conexao *insereConexaoFinal(Conexao *ini, int sid, int estado) {
+  Conexao *aux = ini;
+  while(aux->prox != NULL) aux = aux->prox;
+  Conexao *novo = novaConexao(sid, estado);
+  aux->prox = novo;
+  return novo;
+}
+
+//Função que insere no início (cabeça) da lista ligada Conxao
+//Retorna um ponteiro para a cabeça
+Conexao *insereConexaoInicio(int sid, int estado) {
+  Conexao *novo = novaConexao(sid, estado);
+  return novo;
+}
+
+//Função responsável por criar um "Nó" para ser colocado na lista ligada das Conexao
+//Retorna um ponteiro para o Nó criado
+Conexao *novaConexao(int sid, int estado) {
+  Conexao *novo = malloc(sizeof(Conexao));
+  novo->sid = sid;
+  novo->estado = estado;
+  novo->prox = NULL;
+  
+  return novo;
+}
+
+
 //Função que insere no final da lista ligada das Perguntas, uma pergunta
 int inserePerguntaFinal(Pergunta *ini, const unsigned char *p) {
   Pergunta *aux = ini;
@@ -515,4 +870,28 @@ Pergunta *getUltimaPergunta(Pergunta *ini) {
   Pergunta *aux = ini;
   while(aux->prox != NULL) aux = aux->prox;
   return aux;
+}
+
+int recvtimeout(int s, char *buf, int len, int timeout)
+{
+  fd_set fds;
+  int n;
+  struct timeval tv;
+  
+  // set up the file descriptor set
+  FD_ZERO(&fds);
+  FD_SET(s, &fds);
+  
+  // set up the struct timeval for the timeout
+  tv.tv_sec = timeout;
+  tv.tv_usec = 0;
+  
+  // wait until timeout or data received
+  n = select(s+1, &fds, NULL, NULL, &tv);
+  
+  if (n == 0) return -2; // timeout!
+  if (n == -1) return -1; // error
+
+  // data must be here, so do a normal recv()
+  return recv(s, buf, len, 0);
 }

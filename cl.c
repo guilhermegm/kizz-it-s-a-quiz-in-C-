@@ -11,14 +11,23 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sys/time.h>
+#include <sys/types.h>
 
 #define PORT "3490" // the port client will be connecting to 
-#define MAXDATASIZE 200 // max number of bytes we can get at once 
+#define MAXDATASIZE 1200 // max number of bytes we can get at once 
 #define NP "200 OK"
 
-int telaInicial(int sockfd);
-int trataConexao(int sockfd);
-int charToint(char c);
+#define TELA_INICIAL 1
+#define SELECIONA_JOGO 2
+#define RANK 3
+#define SAIR 4
+
+#define JOGAR_2 5
+#define JOGAR_4 6
+#define JOGAR_8 7
+
+void *enviaResposta(void *aux);
 
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa)
@@ -83,11 +92,12 @@ int main(int argc, char *argv[])
 }
 
 // 0 - Tela Inicial // 1 - Jogar // 2 - Rank // 3 - Sair
-int trataConexao(int sockfd) {
+int trataConexao(int sid) {
   char buf[MAXDATASIZE];
-  int ms, sair;
+  int receiv, ms, sair;
   
-  sair = 0;
+  telas(sid);
+  /*sair = 0;
   ms = 0;
   while(!sair) {
     if(ms == 0)
@@ -100,10 +110,59 @@ int trataConexao(int sockfd) {
       sair = 1;
     else
       printf("Operação inválida");
+  }*/
+  
+  close(sid);
+  return 1;
+}
+
+int telas(sid) {
+  char buf[MAXDATASIZE];
+  int tela, receiv;
+  
+  while(1) {
+    receiv = recv(sid, buf, MAXDATASIZE, 0);
+    tela = atoi(buf);
+
+    if(tela == TELA_INICIAL) {
+      telaInicial(sid);
+    }
+    else if(tela == SELECIONA_JOGO) {
+      selecionaJogo(sid);
+    }
+    else if(tela == JOGAR_2) {
+      iniciaJogo(sid);
+    }
+    else if(tela == SAIR) {
+      break;
+    }
   }
   
-  close(sockfd);
-  return 1;
+  return 0;
+}
+
+int telaInicial(int sid) {
+  char buf[MAXDATASIZE];
+  int numbytes;
+  
+  printf("KUIZZ\n\n1) Jogar\n2) Rank\n3) Sair\n\n");
+  scanf("%c", buf);
+
+  send(sid, buf, strlen(buf)+1, 0);
+
+  return 0;
+}
+
+int selecionaJogo(int sid) {
+  char buf[MAXDATASIZE];
+  int numbytes;
+  
+  printf("KUIZZ\n\n1) 2 Jogadores\n2) 4 Jogadores\n3) 8 Jogadores\n\n");
+  scanf("%c", buf);
+
+  send(sid, buf, strlen(buf)+1, 0);
+
+  return 0;
 }
 
 int exibeRank(int sockfd) {
@@ -131,49 +190,52 @@ int exibeRank(int sockfd) {
   
   return 0;
 }
+int fimJogo;
 
 int iniciaJogo(int sockfd) {
   char buf[MAXDATASIZE];
-  int i, num_perg;
+  int receiv;
   
-  //Recebe o número de perguntas
-  recv(sockfd, buf, MAXDATASIZE, 0);
-  num_perg = atoi(buf);
-
-  strcpy(buf, NP); 
-  send(sockfd, buf, strlen(buf)+1, 0); //Confirmação/Espera de recebimento (No Problem)
-  
-  for(i=0; i<num_perg; i++) {
-    //Recebe e exibe o enunciado da pergunta
-    recv(sockfd, buf, MAXDATASIZE, 0);
-    printf("\n\n%s\n\n", buf);
-
-    strcpy(buf, NP);
-    send(sockfd, buf, strlen(buf)+1, 0); //Confirmação/Espera de recebimento (No Problem)
-    
-    recebeAlternativas(sockfd);
-
-    //Recebe e envia a resposta da pergunta
-    printf("\nDigite o número da resposta:\n");
-    scanf("%s", buf);
-    send(sockfd, buf, strlen(buf)+1, 0);
-
-    recv(sockfd, buf, MAXDATASIZE, 0);
+  //Aguardando Jogadores
+  while(1) {
+    receiv = recv(sockfd, buf, MAXDATASIZE, 0);
+    if(strcmp(buf, NP) == 0)
+      break;
     printf("%s", buf);
+    fflush(stdout);
   }
   
+  //Msg de controle para estabelecer sincronização entre as conexões na Sala
   strcpy(buf, NP);
-  send(sockfd, buf, strlen(buf)+1, 0); //Confirmação/Espera de recebimento (No Problem)
-
-  recv(sockfd, buf, MAXDATASIZE, 0);
-  printf("\n\n%s\nDigite seu nome: ", buf);
-  scanf("%s", buf);
-  //Envia o nome 
   send(sockfd, buf, strlen(buf)+1, 0);
   
-  printf("\nFim de jogo!\n\n");
-  
+  pthread_t con;
+  int rc = 0;
+  fimJogo = 0;
+  rc = pthread_create(&con, NULL, enviaResposta, (void *)sockfd);
+  printf("sock: %d", sockfd);
+  while(1) {    
+    receiv = recv(sockfd, buf, MAXDATASIZE, 0);
+    if(strcmp(buf, "eog") == 0) break;
+    printf("%s", buf);
+    sleep(1);
+  }
+
+  fimJogo = 1;
+  pthread_exit(NULL);
   return 0;
+}
+
+void *enviaResposta(void *tsid) {
+  char buf[MAXDATASIZE];
+  int sid = (int)tsid;
+  
+  while(!fimJogo) {
+    scanf("%s", buf);
+    send(sid, buf, strlen(buf)+1, 0);  
+  }
+  
+  pthread_exit(NULL);
 }
 
 int recebeAlternativas(int sockfd) {
@@ -200,19 +262,30 @@ int recebeAlternativas(int sockfd) {
   return 1;
 }
 
-int telaInicial(int sockfd) {
-  char buf[MAXDATASIZE];
-  int numbytes;
-  
-  recv(sockfd, buf, MAXDATASIZE, 0);
-  printf("%s\n", buf);
-  scanf("%s", buf);
-
-  send(sockfd, buf, strlen(buf)+1, 0);
-
-  return atoi(buf);  
-}
-
 int charToint(char c) {
   return c - 'a';
+}
+
+int recvtimeout(int s, char *buf, int len, int timeout)
+{
+  fd_set fds;
+  int n;
+  struct timeval tv;
+  
+  // set up the file descriptor set
+  FD_ZERO(&fds);
+  FD_SET(s, &fds);
+  
+  // set up the struct timeval for the timeout
+  tv.tv_sec = timeout;
+  tv.tv_usec = 0;
+  
+  // wait until timeout or data received
+  n = select(s+1, &fds, NULL, NULL, &tv);
+  
+  if (n == 0) return -2; // timeout!
+  if (n == -1) return -1; // error
+
+  // data must be here, so do a normal recv()
+  return recv(s, buf, len, 0);
 }
