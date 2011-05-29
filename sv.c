@@ -57,6 +57,7 @@ typedef struct _conexao {
   int sid;        //socket id
   int estado;     //Maquina de Estados
   int pontos;
+  int ctJogo;
   struct _conexao *prox;
 }Conexao;
 
@@ -75,6 +76,7 @@ typedef struct _salaJogo {
 
 Pergunta *listaPergunta; 
 Conexao *listaConexao;
+pthread_mutex_t mutexsum;
 SalaJogo *salaJogo2;
 SalaJogo *listaJogo4;
 SalaJogo *listaJogo8;
@@ -296,6 +298,10 @@ int proximoEstado(Conexao *con, int proxEstado) {
     else if(proxEstado == 3)
       con->estado = JOGAR_8;          
   }
+  else if(con->estado == JOGAR_2) {
+    if(proxEstado == 1)
+      con->estado = SELECIONA_JOGO;
+  }
   
   return 0;
 }
@@ -308,20 +314,20 @@ int iniciaJogo2(Conexao *con) {
   int i, numbytes, pontos, rc;
   int numJogadores = 2;
   int num_perg = 5;
-  char str[10];
   SalaJogo *aux;
   
   sprintf(buf, "%d", JOGAR_2);
   numbytes = send(con->sid, buf, strlen(buf)+1, 0);
-  
+  pthread_mutex_lock(&mutexsum);
+  con->ctJogo = 1;
+  pthread_mutex_unlock(&mutexsum);
   if(verificaSalaJogo(con, numJogadores) == -1) {
     criaSalaJogo(con, numJogadores);
     aux = getUltimaSalaJogo();
     rc = pthread_create(&aux->tsala, NULL, gerenciaSalaJogo, (void *)aux);
   }
 
-  pthread_exit(NULL);
-  
+  while(con->ctJogo == 1) sleep(1);
   return 0;
 }
 
@@ -332,8 +338,8 @@ void *gerenciaSalaJogo(void *tsalaJogo) {
   
   aguardaJogadores(salaJogo);
   enviarPerguntas(salaJogo, perguntas);
-  
-  pthread_exit(NULL);
+
+  return 0;
 }
 
 int enviarPerguntas(SalaJogo *salaJogo, Pergunta *perguntas) {
@@ -341,74 +347,123 @@ int enviarPerguntas(SalaJogo *salaJogo, Pergunta *perguntas) {
   Pergunta *p = salaJogo->perg;
   char buf[MAXDATASIZE];
   pthread_t con1, con2;
-  int receiv, ctlCon, rc;
-
+  int receiv, rc;
+  int i = 0;
   receiv = verificaRecebimento(salaJogo); //Msg de controle para estabelecer sincronização entre as conexões na Sala
 
   salaJogo->receiv = 0;
   salaJogo->jogoFim = 0;
+  salaJogo->con1->pontos = 0;
+  salaJogo->con2->pontos = 0;
   rc = pthread_create(&con1, NULL, controlaJogo1, (void *)salaJogo);
   rc = pthread_create(&con2, NULL, controlaJogo2, (void *)salaJogo);
   
-  while(p != NULL) {
-    sleep(1);
+  while(p != NULL && i < 1) {
     //Envie o enunciado da pergunta
     sprintf(buf, "\n%s\n\n", p->pergunta);
     enviaMsgSalaJogo(salaJogo, buf);
   
     //receiv = verificaRecebimento(salaJogo);
-    sleep(1);
-  
     enviaAlternativas(salaJogo, p);
     
     //Recebe resposta
     //receiv = verificaRecebimento(salaJogo, buf);
     //sockReceiv = recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0);
-    salaJogo->con1Resp = 0;
-    salaJogo->con2Resp = 0;
+    sleep(1);
+    pthread_mutex_lock(&mutexsum);
     salaJogo->receiv = 1;
     salaJogo->sidResp = 0;
-    while(salaJogo->sidResp == 0) sleep(1);
+    salaJogo->con1Resp = 0;
+    salaJogo->con2Resp = 0;
+    pthread_mutex_unlock(&mutexsum);
+    while(salaJogo->sidResp == 0) {
+      if(salaJogo->con1Resp == 1 && salaJogo->con2Resp == 1) 
+	break;
+      sleep(1);
+    }
+    pthread_mutex_lock(&mutexsum);
     if(salaJogo->sidResp != 0) adicinaPonto(salaJogo);
-    printf("respondu!!\n");
-    
+    if(salaJogo->con1Resp == 1 && salaJogo->sidResp != salaJogo->con1->sid) removePonto(salaJogo->con1);
+    if(salaJogo->con2Resp == 1 && salaJogo->sidResp != salaJogo->con2->sid) removePonto(salaJogo->con2);
     salaJogo->receiv = 0;
     salaJogo->sidResp = 0;
-    
+    pthread_mutex_unlock(&mutexsum);
     p = p->prox;
     salaJogo->perg = p;
+    i++;
   }
-  enviaMsgSalaJogo(salaJogo, "eog"); //End of Game
+  pthread_mutex_lock(&mutexsum);
+  salaJogo->jogoFim = 1;
+  pthread_mutex_unlock(&mutexsum);
+  enviaMsgVencedor(salaJogo);
   
-  pthread_exit(NULL);
-  pthread_exit(NULL);
+  sprintf(buf, "Você, socket %d marcou %d pontos\n\n", salaJogo->con1->sid, salaJogo->con1->pontos);
+  send(salaJogo->con1->sid, buf, strlen(buf)+1, 0);
+  sprintf(buf, "Você, socket %d marcou %d pontos\n\n", salaJogo->con2->sid, salaJogo->con2->pontos);
+  send(salaJogo->con2->sid, buf, strlen(buf)+1, 0);
+  sleep(1);
+  enviaMsgSalaJogo(salaJogo, "eog"); //End of Game
+
+  sprintf(buf, "%d", TELA_INICIAL);
+  enviaMsgSalaJogo(salaJogo, buf);
+
+  pthread_mutex_lock(&mutexsum);
+  salaJogo->con1->ctJogo = 0;
+  salaJogo->con2->ctJogo = 0;
+  pthread_mutex_unlock(&mutexsum);
+  return 0;
+}
+
+int removePonto(Conexao *con) {
+  con->pontos -= 9;
+  return 0;
+}
+
+int enviaMsgVencedor(SalaJogo *salaJogo) {
+  char buf[MAXDATASIZE];
+  int venc;
+  
+  venc = salaJogo->con1->pontos;
+  if(venc == salaJogo->con2->pontos) {
+    sprintf(buf, "\nO socket %d e %d empatou com %d pontos!!\n", salaJogo->con1->sid, salaJogo->con2->sid, salaJogo->con2->pontos);
+    enviaMsgSalaJogo(salaJogo, buf);
+  } else if(venc < salaJogo->con2->pontos) {
+    sprintf(buf, "\nO socket %d venceu a partida com %d pontos!!\n", salaJogo->con2->sid, salaJogo->con2->pontos);
+    enviaMsgSalaJogo(salaJogo, buf);
+  } else {
+    sprintf(buf, "\nO socket %d venceu a partida com %d pontos!!\n", salaJogo->con1->sid, salaJogo->con1->pontos);
+    enviaMsgSalaJogo(salaJogo, buf);
+  }
+
+  return 0;
 }
 
 void *controlaJogo1(void *tsalaJogo) {  
   SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
   char buf[MAXDATASIZE];
-  printf("con: 1\n");
-  fflush(stdout);
+
   while(!salaJogo->jogoFim) {
     if(salaJogo->receiv) {
-      //Recebe a resposta da Pergunta
-      recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0);
-      printf("2sid: %d, resp: %s\n", salaJogo->con1->sid, buf);
-      fflush(stdout);
-      
-      if(!salaJogo->con1Resp && strcmp(buf, "") != 0) {
-        if(salaJogo->sidResp == 0 && !verificaResposta(salaJogo->perg, atoi(buf)-1)) {
-	  salaJogo->sidResp = 1;
-          strcpy(buf, "\nResposta Correta!\n\n");
-        } 
-        else strcpy(buf, "\nResposta Errada!\n\n");
-        send(salaJogo->con1->sid, buf, strlen(buf)+1, 0);
+      if(!salaJogo->con1Resp) {
+	//Recebe a resposta da Pergunta
+	recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0);
+
+	if(strcmp(buf, "") != 0) {
+	  if(salaJogo->sidResp == 0 && verificaResposta(salaJogo->perg, tolower(buf[0]))) {
+	    pthread_mutex_lock(&mutexsum);
+	    salaJogo->sidResp = 1;
+	    pthread_mutex_unlock(&mutexsum);
+	    sprintf(buf, "\nResposta [%c] Correta!\n", buf[0]);
+	  } 
+	  else sprintf(buf, "\nResposta [%c] Errada!\n", buf[0]);
+	  send(salaJogo->con1->sid, buf, strlen(buf)+1, 0);
+	}
+	pthread_mutex_lock(&mutexsum);
 	salaJogo->con1Resp = 1;
-	printf("(sidr: %d)\n", salaJogo->sidResp);
-	fflush(stdout);
+	pthread_mutex_unlock(&mutexsum);
       }
-      sleep(1);
     }
+    sleep(1);
   }
   pthread_exit(NULL);
 }
@@ -416,37 +471,38 @@ void *controlaJogo1(void *tsalaJogo) {
 void *controlaJogo2(void *tsalaJogo) {  
   SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
   char buf[MAXDATASIZE];
-  printf("con: 2\n");
-  fflush(stdout);
+
   while(!salaJogo->jogoFim) {
     if(salaJogo->receiv) {
-      //Recebe a resposta da Pergunta
-      recv(salaJogo->con2->sid, buf, MAXDATASIZE, 0);
-      printf("4sid: %d, resp: %s\n", salaJogo->con2->sid, buf);
-      fflush(stdout);
-      
-      if(!salaJogo->con2Resp && strcmp(buf, "") != 0) {
-        if(salaJogo->sidResp == 0 && !verificaResposta(salaJogo->perg, atoi(buf)-1)) {
-	  salaJogo->sidResp = 2;
-          strcpy(buf, "\n\nResposta Correta!\n\n");
-        } 
-        else strcpy(buf, "\n\nResposta Errada!\n\n");
-	send(salaJogo->con2->sid, buf, strlen(buf)+1, 0);
+      if(!salaJogo->con2Resp) {
+	//Recebe a resposta da Pergunta
+	recv(salaJogo->con2->sid, buf, MAXDATASIZE, 0);
+	
+	if(!salaJogo->con2Resp && strcmp(buf, "") != 0) {
+	  if(salaJogo->sidResp == 0 && verificaResposta(salaJogo->perg, tolower(buf[0]))) {
+	    pthread_mutex_lock(&mutexsum);
+	    salaJogo->sidResp = 2;
+	    pthread_mutex_unlock(&mutexsum);
+	    sprintf(buf, "\nResposta [%c] Correta!\n", buf[0]);
+	  } 
+	  else sprintf(buf, "\nResposta [%c] Errada!\n", buf[0]);
+	  send(salaJogo->con2->sid, buf, strlen(buf)+1, 0);
+	}
+	pthread_mutex_lock(&mutexsum);
 	salaJogo->con2Resp = 1;
-	printf("(sidr: %d)\n", salaJogo->sidResp);
-	fflush(stdout);
+	pthread_mutex_unlock(&mutexsum);
       }
-      sleep(1);
     }
+    sleep(1);
   }
   pthread_exit(NULL);
 }
 
 int adicinaPonto(SalaJogo *salaJogo) {
   if(salaJogo->sidResp == 1)
-    salaJogo->con1->pontos += 15;
+    salaJogo->con1->pontos += 17;
   else if(salaJogo->sidResp == 2)
-    salaJogo->con2->pontos += 15;
+    salaJogo->con2->pontos += 17;
 
   return 0;
 }
@@ -499,8 +555,7 @@ int aguardaJogadores(SalaJogo *salaJogo) {
       enviaMsgSalaJogo(salaJogo, buf);
       j = i;
     }
-    
-    sleep(1);
+
     if(i == 2)
       break;
   }
@@ -511,20 +566,25 @@ int aguardaJogadores(SalaJogo *salaJogo) {
 }
 
 int enviaMsgSalaJogo(SalaJogo *salaJogo, char msg[MAXDATASIZE]) {
+  pthread_mutex_lock(&mutexsum);
   if(salaJogo->con1 != NULL)
     send(salaJogo->con1->sid, msg, strlen(msg)+1, 0);
   if(salaJogo->con2 != NULL)
     send(salaJogo->con2->sid, msg, strlen(msg)+1, 0);
+  pthread_mutex_unlock(&mutexsum);
+  sleep(1);
   
   return 0;
 }
 
 int numJogadoresSalaJogo(SalaJogo *salaJogo) {
   int i = 0;
+  pthread_mutex_lock(&mutexsum);
   if(salaJogo->con1 != NULL)
     i++;
   if(salaJogo->con2 != NULL)
     i++;
+  pthread_mutex_unlock(&mutexsum);
   return i;
 }
 
@@ -541,16 +601,18 @@ int verificaSalaJogo(Conexao *con, int numJogadores) {
       salaAux = salaAux->prox;
     }
   }
+
   return -1;
 }
 
 int criaSalaJogo(Conexao *con, int numJogadores) {
+  pthread_mutex_lock(&mutexsum);
   if(salaJogo2 == NULL) {
     salaJogo2 = insereSalaJogoInicio(con);
   } else {
     insereSalaJogoFinal(salaJogo2, con);
   }
-  
+  pthread_mutex_unlock(&mutexsum);
   return 0;
 }
 
@@ -678,9 +740,11 @@ int adicionaRank(char *nome, int pontos) {
 int verificaResposta(Pergunta *p, int n) {
   Alternativa *aux = p->alt;
   int i;
-  
-  for(i=0; i<n; i++)
+
+  n = n - 'a';
+  for(i=0; i<n && aux->prox != NULL; i++) {
     aux = aux->prox;
+  }
   
   return aux->correta;
 }

@@ -146,8 +146,7 @@ int telaInicial(int sid) {
   int numbytes;
   
   printf("KUIZZ\n\n1) Jogar\n2) Rank\n3) Sair\n\n");
-  scanf("%c", buf);
-
+  scanf("%s", buf);
   send(sid, buf, strlen(buf)+1, 0);
 
   return 0;
@@ -213,7 +212,7 @@ int iniciaJogo(int sockfd) {
   int rc = 0;
   fimJogo = 0;
   rc = pthread_create(&con, NULL, enviaResposta, (void *)sockfd);
-  printf("sock: %d", sockfd);
+  
   while(1) {    
     receiv = recv(sockfd, buf, MAXDATASIZE, 0);
     if(strcmp(buf, "eog") == 0) break;
@@ -222,7 +221,6 @@ int iniciaJogo(int sockfd) {
   }
 
   fimJogo = 1;
-  pthread_exit(NULL);
   return 0;
 }
 
