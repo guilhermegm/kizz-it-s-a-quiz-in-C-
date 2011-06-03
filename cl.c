@@ -14,20 +14,64 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
-#define PORT "3490" // the port client will be connecting to 
-#define MAXDATASIZE 1200 // max number of bytes we can get at once 
-#define NP "200 OK"
+//Controles Gerais
+#define PORT "3490"   // pota que os usuarios irao se conectar
+#define BACKLOG 100   // quantas conexoes ficaram na fila
+//End-Controles Gerais
 
+//Controles da Maquina de Estado, utilizado no protoloco de aplicacao
+//Telas
+#define NONE 0             // nao definido/nao faz nada
 #define TELA_INICIAL 1
 #define SELECIONA_JOGO 2
 #define RANK 3
 #define SAIR 4
+//End-Telas
+//Jogo
+#define JOGAR_2 100 
+#define JOGAR_4 101
+#define JOGAR_8 102
+#define ESPERA_SALA_CHEIA 201
+#define JOGA 202
+//End-Jogo
+//Geral
+#define EXIBE_MSG 203
+//End-Geral
+//End-Controles da Maquina de Estado
 
-#define JOGAR_2 5
-#define JOGAR_4 6
-#define JOGAR_8 7
+//Controles de verificação, utilizado no protoloco de aplicacao
+#define COK 1              // Pergunta se a mensagem enviada foi recebida (Recebeu?)
+#define CYEP 2             // Resposta para a pergunta do COK (Sim)
+#define CFT 3              // Controle Finaliza Tarefa sem confirmacao de recebimento
+#define CFF 4              // Controle Forçar Finalizacao com confirmacao de recebimento
+//End-Controles de verificação
+
+typedef struct _salaChat {
+  pthread_t tChatRecebe;
+  pthread_t tChatEnvia;
+  int sid;
+  int ativo;
+}SalaChat;
+
+typedef struct _salaJogo {
+  pthread_t tSalaJogoRecebe;
+  pthread_t tSalaJogoEnvia;
+  int sid;
+  int ativo;
+}SalaJogo;
+
+pthread_t tEnvia, tRecebe;
+int estado;
 
 void *enviaResposta(void *aux);
+void *controleEnvia(void *tsid);
+void *controleRecebe(void *tsid);
+void *chatRecebe(void *tsalaChat);
+void *chatEnvia(void *tsalaChat);
+SalaChat *novaSalaChat(int sid);
+void *salaJogoEnvia(void *tsalaJogo);
+void *salaJogoRecebe(void *tsalaJogo);
+SalaJogo *novaSalaJogo(int sid);
 
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa)
@@ -78,17 +122,258 @@ int main(int argc, char *argv[])
     printf("client: connecting to %s\n", s);
     freeaddrinfo(servinfo); // all done with this structure
     
-    trataConexao(sockfd);
+    //pthread_create(&tEnvia, NULL, controleEnvia, (void *)sockfd);
+    pthread_create(&tRecebe, NULL, controleRecebe, (void *)sockfd);
     
-    /*if ((numbytes = recv(sockfd, buf, MAXDATASIZE-1, 0)) == -1) {
-        perror("recv");
-	
-        exit(1);
-    }
-    buf[numbytes] = '\0';
-    printf("client: received '%s'\n",buf);
-    close(sockfd);*/
+    pthread_exit(NULL);
+    close(sockfd);
     return 0;
+}
+
+void *controleEnvia(void *tsid) {
+  int sid = (int)tsid;
+  char buf[MAXDATASIZE];
+  
+  while(1) {
+    scanf("%s", buf);
+    serializeKTCP(buf, NONE, CYEP, atoi(buf), buf);
+    send(sid, buf, strlen(buf)+1, 0);
+  }
+  
+  pthread_exit(NULL);
+}
+
+void *controleRecebe(void *tsid) {
+  int sid = (int)tsid;
+  char buf[MAXDATASIZE];
+  
+  while(1) {
+    recv(sid, buf, MAXDATASIZE, 0);
+    trataRecebimento(sid, buf);
+  }
+ 
+  pthread_exit(NULL);
+}
+
+int trataRecebimento(int sid, char buf[MAXDATASIZE]) {
+  char buf2[MAXDATASIZE];
+  int controle = deserializeKTCPControle(buf);
+  if(controle != NONE) {
+    if(controle == COK) {
+      serializeKTCP(buf2, NONE, CYEP, NONE, "");
+      send(sid, buf2, strlen(buf2)+1, 0);
+    }
+  }
+
+  int tela = deserializeKTCPTela(buf);
+  if(tela != NONE) {
+    if(tela == TELA_INICIAL) {
+      exibeTelaInicial();
+      enviaMsgJogador(sid);
+    }
+    if(tela == RANK) {
+      char aux[MAXDATASIZE];
+      deserializeKTCPDados(buf, aux);
+      exibeMsg(aux);
+      fflush(stdout);
+    }
+    else if(tela == SELECIONA_JOGO) {
+      exibeSelecionaJogo();
+      enviaMsgJogador(sid);
+    }
+    else if(tela == JOGAR_2) {
+      exibeGetNomeJogador();
+      enviaMsgJogador(sid);
+    }
+    else if(tela == JOGAR_4) {
+      exibeGetNomeJogador();
+      enviaMsgJogador(sid);
+    }
+    else if(tela == ESPERA_SALA_CHEIA) {
+      char aux[MAXDATASIZE];
+      deserializeKTCPDados(buf, aux);
+      exibeMsg(aux);
+      iniciaChat(sid);
+    }
+    else if(tela == EXIBE_MSG) {
+      char aux[MAXDATASIZE];
+      deserializeKTCPDados(buf, aux);
+      fflush(stdout);
+      exibeMsg(aux);
+    }
+    else if(tela == JOGA) {
+      iniciaJogo(sid);
+    }
+  }
+  return 0;
+}
+
+//Jogo
+int iniciaJogo(int sid) {
+  SalaJogo *salaJogo = novaSalaJogo(sid);
+  salaJogo->ativo = 1;
+  pthread_create(&salaJogo->tSalaJogoEnvia, NULL, salaJogoEnvia, (void *)salaJogo);
+  pthread_create(&salaJogo->tSalaJogoRecebe, NULL, salaJogoRecebe, (void *)salaJogo);
+  
+  while(salaJogo->ativo) { sleep(1); }
+
+  pthread_cancel(salaJogo->tSalaJogoRecebe);
+  return 0;
+}
+
+void *salaJogoEnvia(void *tsalaJogo) {
+  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
+  enviaMsgJogador(salaJogo->sid);
+  pthread_exit(NULL);
+}
+
+void *salaJogoRecebe(void *tsalaJogo) {
+  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
+  char buf[MAXDATASIZE], aux[MAXDATASIZE];
+  while(1) {
+    recv(salaJogo->sid, buf, MAXDATASIZE, 0);
+    if(deserializeKTCPControle(buf) == CFF) {
+      pthread_cancel(salaJogo->tSalaJogoEnvia);
+      serializeKTCP(aux, NONE, CYEP, NONE, "");
+      send(salaJogo->sid, aux, strlen(aux)+1, 0);
+      break;
+    }
+    deserializeKTCPDados(buf, aux);
+    printf("%s", aux);
+    sleep(1);
+  }
+  salaJogo->ativo = 0;
+  pthread_exit(NULL);
+}
+
+SalaJogo *novaSalaJogo(int sid) {
+  SalaJogo *novo = (SalaJogo *)malloc(sizeof(SalaJogo));
+  novo->sid = sid;
+  return novo;
+}
+
+//Chat
+int iniciaChat(int sid) {
+  SalaChat *salaChat = novaSalaChat(sid);
+  salaChat->ativo = 1;
+  pthread_create(&salaChat->tChatEnvia, NULL, chatEnvia, (void *)salaChat);
+  pthread_create(&salaChat->tChatRecebe, NULL, chatRecebe, (void *)salaChat);
+  //pthread_exit(NULL);
+  while(salaChat->ativo) { sleep(1); }
+  pthread_cancel(salaChat->tChatRecebe);
+  pthread_cancel(salaChat->tChatEnvia);
+  return 0;
+}
+
+void *chatEnvia(void *tsalaChat) {
+  SalaChat *salaChat = (SalaChat *)tsalaChat;
+  while(1) {
+    enviaMsgJogadorGets(salaChat->sid);
+  }
+  pthread_exit(NULL);
+}
+
+void *chatRecebe(void *tsalaChat) {
+  SalaChat *salaChat = (SalaChat *)tsalaChat;
+  char buf[MAXDATASIZE], aux[MAXDATASIZE];
+  while(1) {
+    recv(salaChat->sid, buf, MAXDATASIZE, 0);
+    if(deserializeKTCPControle(buf) == CFT)
+      break;
+    deserializeKTCPDados(buf, aux);
+    exibeMsg(aux);
+  }
+  salaChat->ativo = 0;
+  pthread_exit(NULL);
+}
+
+SalaChat *novaSalaChat(int sid) {
+  SalaChat *novo = (SalaChat *)malloc(sizeof(SalaChat));
+  novo->sid = sid;
+  return novo;
+}
+//End-Chat
+
+//Controles
+int enviaMsgJogador(int sid) {
+  char buf[MAXDATASIZE], aux[MAXDATASIZE];
+  scanf("%s", aux);
+  serializeKTCP(buf, NONE, NONE, atoi(aux), aux);
+  send(sid, buf, strlen(buf)+1, 0);
+  return 0;
+}
+
+int enviaMsgJogadorGets(int sid) {
+  char buf[MAXDATASIZE], aux[MAXDATASIZE];
+  gets(aux);
+  serializeKTCP(buf, NONE, NONE, atoi(aux), aux);
+  send(sid, buf, strlen(buf)+1, 0);
+  return 0;
+}
+
+//Kuizz Transfer Control Protocol
+int serializeKTCP(char buf[MAXDATASIZE], int tela, int controle, int proxEstado, char dados[MAXDATASIZE]) {
+  sprintf(buf, "%3d%1d%1d%s", tela, controle, proxEstado, dados);
+  return 0;
+}
+
+int deserializeKTCPTela(char buf[MAXDATASIZE]) {
+  char aux[MAXDATASIZE];
+  sprintf(aux, "%1c%1c%1c", buf[0], buf[1], buf[2]);
+  return atoi(aux);
+}
+
+int deserializeKTCPControle(char buf[MAXDATASIZE]) {
+  char aux[MAXDATASIZE];
+  sprintf(aux, "%1c", buf[3]);
+  return atoi(aux);
+}
+
+int deserializeKTCPProxEstado(char buf[MAXDATASIZE]) {
+  char aux[MAXDATASIZE];
+  sprintf(aux, "%1c", buf[4]);
+  return atoi(aux);
+}
+
+int deserializeKTCPDados(char buf[MAXDATASIZE], char destino[MAXDATASIZE]) {
+  substring(buf, 5, strlen(buf)-5, destino);
+  return 0;
+}
+
+int substring(char origem[MAXDATASIZE], int inicio, int quantidade, char destino[MAXDATASIZE]) {
+  int i;
+  for(i=0; i<=quantidade; i++, inicio++) {
+    destino[i] = origem[inicio];
+  }
+  destino[i+1] = '\0';
+  return 0;
+}
+//End-Controles
+
+/***********************************************
+ ******************* Telas *********************
+ ***********************************************/
+int exibeTelaInicial() {
+  char buf[MAXDATASIZE];
+  printf("\nKUIZZ\n\n1) Jogar\n2) Rank\n3) Sair\n");
+  return 0;
+}
+
+int exibeSelecionaJogo() {
+  char buf[MAXDATASIZE];
+  printf("\nKUIZZ\n\n1) 2 Jogadores\n2) 4 Jogadores\n3) Voltar\n");
+  return 0;
+}
+
+int exibeGetNomeJogador() {
+  char buf[MAXDATASIZE];
+  printf("\nDigite seu nome:\n");
+  return 0;  
+}
+
+int exibeMsg(char buf[MAXDATASIZE]) {
+  printf("%s", buf);  
+  return 0;  
 }
 
 // 0 - Tela Inicial // 1 - Jogar // 2 - Rank // 3 - Sair
@@ -125,7 +410,7 @@ int telas(sid) {
     tela = atoi(buf);
 
     if(tela == TELA_INICIAL) {
-      telaInicial(sid);
+      //telaInicial(sid);
     }
     else if(tela == SELECIONA_JOGO) {
       selecionaJogo(sid);
@@ -138,17 +423,6 @@ int telas(sid) {
     }
   }
   
-  return 0;
-}
-
-int telaInicial(int sid) {
-  char buf[MAXDATASIZE];
-  int numbytes;
-  
-  printf("KUIZZ\n\n1) Jogar\n2) Rank\n3) Sair\n\n");
-  scanf("%s", buf);
-  send(sid, buf, strlen(buf)+1, 0);
-
   return 0;
 }
 
@@ -191,7 +465,7 @@ int exibeRank(int sockfd) {
 }
 int fimJogo;
 
-int iniciaJogo(int sockfd) {
+/*int iniciaJogo(int sockfd) {
   char buf[MAXDATASIZE];
   int receiv;
   
@@ -201,7 +475,6 @@ int iniciaJogo(int sockfd) {
     if(strcmp(buf, NP) == 0)
       break;
     printf("%s", buf);
-    fflush(stdout);
   }
   
   //Msg de controle para estabelecer sincronização entre as conexões na Sala
@@ -222,7 +495,7 @@ int iniciaJogo(int sockfd) {
 
   fimJogo = 1;
   return 0;
-}
+}*/
 
 void *enviaResposta(void *tsid) {
   char buf[MAXDATASIZE];

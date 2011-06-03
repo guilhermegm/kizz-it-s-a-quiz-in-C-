@@ -1,8 +1,4 @@
 /*
-** server.c -- a stream socket server demo
-INSERT INTO Pergunta (pergunta) VALUES("");
-INSERT INTO Alternativa (idPergunta, alternativa, correta) VALUES (1, "", 0);
-SELECT p.idPergunta, p.pergunta, a.alternativa, a.correta FROM Pergunta p, Alternativa a WHERE a.idPergunta = p.idPergunta;
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,23 +16,44 @@ SELECT p.idPergunta, p.pergunta, a.alternativa, a.correta FROM Pergunta p, Alter
 #include <sys/time.h>
 #include <sys/types.h>
 
-#define PORT "3490"  // the port users will be connecting to
-#define BACKLOG 10   // how many pending connections queue will hold
+//Controles Gerais
+#define PORT "3490"   // pota que os usuarios irao se conectar
+#define BACKLOG 100   // quantas conexoes ficaram na fila
 
-#define NUM_ALTERNATIVAS 4 // Numero de questoes por pergunta
-#define MAXDATASIZE 1200
-#define NP "200 OK"
-#define NUM_THREADS 100000
-#define MAX_SALA_JOGO 100
+#define NUM_ALTERNATIVAS 4 // numero de questoes por pergunta
+#define MAXDATASIZE 1200   // tamanho maximo do protocolo de aplicacao
+#define MAXNOMESIZE 20     // tamanho maximo do nome do jogador
+#define MAXJOGADORSALA 4   // o maximo de jogadores nas salas
+#define PONTOS_ACERTO 17   // pontos por pergunta, quando o jogador acerta
+#define PONTOS_ERRO -9     // pontos por pegunta, quando o jogador erra
+//End-Controles Gerais
 
+//Controles da Maquina de Estado, utilizado no protoloco de aplicacao
+//Telas
+#define NONE 0             // nao definido/nao faz nada
 #define TELA_INICIAL 1
 #define SELECIONA_JOGO 2
 #define RANK 3
 #define SAIR 4
+//End-Telas
+//Jogo
+#define JOGAR_2 100 
+#define JOGAR_4 101
+#define JOGAR_8 102
+#define ESPERA_SALA_CHEIA 201
+#define JOGA 202
+//End-Jogo
+//Geral
+#define EXIBE_MSG 203
+//End-Geral
+//End-Controles da Maquina de Estado
 
-#define JOGAR_2 5
-#define JOGAR_4 6
-#define JOGAR_8 7
+//Controles de verificação, utilizado no protoloco de aplicacao
+#define COK 1              // Pergunta se a mensagem enviada foi recebida (Recebeu?)
+#define CYEP 2             // Resposta para a pergunta do COK (Sim)
+#define CFT 3              // Controle Finaliza Tarefa sem confirmacao de recebimento
+#define CFF 4              // Controle Forçar Finalizacao com confirmacao de recebimento
+//End-Controles de verificação
 
 typedef struct _alternativa {
   unsigned char alternativa[200];
@@ -53,41 +70,46 @@ typedef struct _pergunta {
 }Pergunta;
 
 typedef struct _conexao {
-  pthread_t tcon; //thread da conexão
-  int sid;        //socket id
-  int estado;     //Maquina de Estados
-  int pontos;
-  int ctJogo;
+  pthread_t tEnvia;
+  char nome[MAXNOMESIZE];
+  int sid;                 // socket id
+  int estado;              // maquina de Estados
+  int pontos;              // pontos atuais em determinado Jogo (Sala)
+  int salaId;              // id da sala em que se encontra
+  int ativo;               // controle de jogadas
   struct _conexao *prox;
 }Conexao;
 
-typedef struct _salaJogo {
-  pthread_t tsala;
-  int receiv;
-  int jogoFim;
-  int sidResp;
+typedef struct _sala {
+  pthread_t tSala;
+  int numJogadores;        // quantidade maxima de jogadores na sala
+  int id;                  // id da sala
+  int ativo[MAXJOGADORSALA];
+  int verifica[MAXJOGADORSALA];
+  int deleta;
   struct _pergunta *perg;
-  struct _conexao *con1;
-  int con1Resp;
-  struct _conexao *con2;
-  int con2Resp;
-  struct _salaJogo *prox;
+  struct _conexao *con[MAXJOGADORSALA];
+  struct _sala *prox;
+}Sala;
+
+typedef struct _salaJogo {
+  int id;
+  struct _sala *sala;
 }SalaJogo;
+
+typedef struct _salaChat {
+  int id;
+  struct _sala *sala;
+}SalaChat;
 
 Pergunta *listaPergunta; 
 Conexao *listaConexao;
+Sala *listaSala;
 pthread_mutex_t mutexsum;
-SalaJogo *salaJogo2;
-SalaJogo *listaJogo4;
-SalaJogo *listaJogo8;
 
 Pergunta *listaPerguntas(Pergunta *ini);
-int inserePergunta(Pergunta *ini, const unsigned char *p);
-int inserePerguntaFinal(Pergunta *ini, const unsigned char *p);
 Pergunta *inserePerguntaInicio(const unsigned char *p);
 Pergunta *novaPergunta(const unsigned char *p);
-int insereAlternativa(Pergunta *pergunta, const unsigned char *p, int correct, int i);
-int insereAlternativaFinal(Alternativa *ini, const unsigned char *p, int correct, int i);
 Alternativa *insereAlternativaInicio(const unsigned char *p, int correct, int i);
 Alternativa *novaAlternativa(const unsigned char *p, int correct, int i);
 Pergunta *getUltimaPergunta(Pergunta *ini);
@@ -96,13 +118,18 @@ Pergunta *sorteiaPergunta(Pergunta *ini);
 Conexao *novaConexao(int sid, int estado);
 Conexao *insereConexaoInicio(int sid, int estado);
 Conexao *insereConexaoFinal(Conexao *ini, int sid, int estado);
-SalaJogo *insereSalaJogoInicio(Conexao *con);
-SalaJogo *novaSalaJogo(Conexao *con);
-SalaJogo *getUltimaSalaJogo();
-void *gerenciaSalaJogo(void *t);
 Pergunta *selecionaPerguntas();
-void *controlaJogo1(void *tsalaJogo);
-void *controlaJogo2(void *tsalaJogo);
+Sala *getUltimaSala();
+Sala *novaSala(Conexao *con, int numJogadores);
+Sala *insereSalaFinal(Conexao *con, int numJogadores);
+Sala *insereSalaInicio(Conexao *con, int numJogadores);
+void *esperaSalaCheia(void *tsala);
+Sala *procuraSala(Conexao *con, int numJogadores);
+void *chatRecebe(void *tsalaChat);
+SalaChat *novaSalaChat(Sala *sala, int id);
+void *iniciaJogo(void *tsala);
+void *jogoRecebe(void *tsalaJogo);
+SalaJogo *novaSalaJogo(Sala *sala, int id);
 
 void sigchld_handler(int s)
 {
@@ -175,12 +202,8 @@ int main(void) {
    listaPergunta = NULL;
    listaPergunta = listaPerguntas(listaPergunta); //Cria uma lista ligada com todas as perguntas até neste instante no banco de dados
    listaConexao = NULL;
+   listaSala = NULL;
    
-   salaJogo2 = NULL;
-
-   int rc;
-   
-   rc = 0;
    printf("server: waiting for connections...\n");
     while(1) {  // main accept() loop
 	Conexao *con = NULL;
@@ -202,478 +225,578 @@ int main(void) {
 	} else {
 	  con = insereConexaoFinal(listaConexao, new_fd, TELA_INICIAL);
 	}
-
-	rc = pthread_create(&con->tcon, NULL, trataConexao, (void *)con);		
+	
+	// Cria uma thread em uma lista para cada cliente conectado
+	pthread_create(&con->tEnvia, NULL, trataConexao, (void *)con);
     }
     return 0;
 }
 
-// 0 - Tela Inicial // 1 - Jogar // 2 - Rank // 3 - Sair
+/***********************************************************
+******************** Maquinha de Estados *******************
+***********************************************************/
+
+//Recebe os pacotes e passa para serem tratados pela maquina de estados
 void *trataConexao(void *tcon) {
   Conexao *con = (Conexao *)tcon;
-  int sair, receiv;
   char buf[MAXDATASIZE];
-
   
-  telas(con);
   
-  //printf("XDDD, %d, %d!\n", con->sid, con->estado);
-
-  //sleep(1);
-
-  /*
-  sair = 0;
-  ms = 0;
-  while(!sair){
-    if(ms == 0)
-      ms = telaInical(sockfd);
-    else if(ms == 1)
-      ms = iniciaJogo(sockfd);
-    else if(ms == 2)
-      ms = exibeRank(sockfd);
-    else if(ms == 3)
-      sair = 1;
-  }*/
-  printf("conct closed");
-  fflush(stdout);
+  serializeKTCP(buf, TELA_INICIAL, COK, NONE, "");
+  enviaMsgCR(con, buf);
+  con->estado = TELA_INICIAL;
+  //pthread_create(&con->tRecebe, NULL, controleRecebe, (void *)con);
   
+  int i = 0;
+  while(!i) {
+    recv(con->sid, buf, MAXDATASIZE, 0);
+    i = trataRecebimento(con, buf);
+  }
+    
   pthread_exit(NULL);
   close(con->sid);
 }
 
-int telas(Conexao *con) {
-  char buf[MAXDATASIZE];
-  int receiv;
-  
-  while(1) {
-    if(con->estado == TELA_INICIAL) {
-      telaInical(con);
-      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
-      proximoEstado(con, atoi(buf));
-    }
-    else if(con->estado == SELECIONA_JOGO) {
-      selecionaJogo(con);
-      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
-      proximoEstado(con, atoi(buf));
-    }
-    else if(con->estado == JOGAR_2) {  
-      iniciaJogo2(con);
-      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
-      proximoEstado(con, atoi(buf));
-    }
-    /*else if(con->estado == JOGAR_4) {  
-      iniciaJogo2(con);
-      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
-      proximoEstado(con, atoi(buf));
-    }
-    else if(con->estado == JOGAR_8) {  
-      iniciaJogo2(con);
-      receiv = recv(con->sid, buf, MAXDATASIZE, 0);
-      proximoEstado(con, atoi(buf));
-    }*/
-    else if(con->estado == SAIR) {
-      sprintf(buf, "%d", SAIR);
-      send(con->sid, buf, strlen(buf)+1, 0);
-      break;
-    }
-  }
-  
-  return 0;
-}
-
-int proximoEstado(Conexao *con, int proxEstado) {
+//Maquina de estado, controla em que parte do jogo o jogador 
+//se encontra e envia essa informacao para o mesmo
+int trataRecebimento(Conexao *con, char buf[MAXDATASIZE]) {
+  int proxEstado = deserializeKTCPProxEstado(buf);
   if(con->estado == TELA_INICIAL) {
-    if(proxEstado == 1)
+    if(proxEstado == 1) {
+      serializeKTCP(buf, SELECIONA_JOGO, COK, NONE, "");
+      enviaMsgCR(con, buf);
       con->estado = SELECIONA_JOGO;
-    else if(proxEstado == 2)
-      con->estado = RANK;
-    else if(proxEstado == 3)
-      con->estado = SAIR;    
+    }
+    if(proxEstado == 2) {
+      char aux[MAXDATASIZE];
+      getExibeRank(aux);
+      serializeKTCP(buf, RANK, COK, NONE, aux);
+      enviaMsgCR(con, buf);
+      serializeKTCP(buf, TELA_INICIAL, COK, NONE, "");
+      enviaMsgCR(con, buf);
+      con->estado = TELA_INICIAL;
+    }
+    if(proxEstado == 3) {
+      serializeKTCP(buf, SAIR, COK, NONE, "");
+      enviaMsgCR(con, buf);
+      con->estado = SAIR;
+    }
   }
   else if(con->estado == SELECIONA_JOGO) {
-    if(proxEstado == 1)
+    if(proxEstado == 1) {
+      serializeKTCP(buf, JOGAR_2, COK, NONE, "");
+      enviaMsgCR(con, buf);
       con->estado = JOGAR_2;
-    else if(proxEstado == 2)
+      controleJogo(con, 2);
+    }
+    if(proxEstado == 2) {
+      serializeKTCP(buf, JOGAR_4, COK, NONE, "");
+      enviaMsgCR(con, buf);
       con->estado = JOGAR_4;
-    else if(proxEstado == 3)
-      con->estado = JOGAR_8;          
-  }
-  else if(con->estado == JOGAR_2) {
-    if(proxEstado == 1)
-      con->estado = SELECIONA_JOGO;
+      controleJogo(con, 4);
+    }
+    if(proxEstado == 3) {
+      serializeKTCP(buf, TELA_INICIAL, COK, NONE, "");
+      enviaMsgCR(con, buf);
+      con->estado = TELA_INICIAL;
+    }
   }
   
   return 0;
 }
 
-/*****************************
-************ JOGO ************
-******************************/
-int iniciaJogo2(Conexao *con) {
-  char buf[MAXDATASIZE];
-  int i, numbytes, pontos, rc;
-  int numJogadores = 2;
-  int num_perg = 5;
-  SalaJogo *aux;
-  
-  sprintf(buf, "%d", JOGAR_2);
-  numbytes = send(con->sid, buf, strlen(buf)+1, 0);
-  pthread_mutex_lock(&mutexsum);
-  con->ctJogo = 1;
-  pthread_mutex_unlock(&mutexsum);
-  if(verificaSalaJogo(con, numJogadores) == -1) {
-    criaSalaJogo(con, numJogadores);
-    aux = getUltimaSalaJogo();
-    rc = pthread_create(&aux->tsala, NULL, gerenciaSalaJogo, (void *)aux);
-  }
+/***********************************************************
+******************* Jogo Multiplayer (Sala) ****************
+***********************************************************/
 
-  while(con->ctJogo == 1) sleep(1);
+//Procura uma sala, espera a sala encher e depois "inicia jogo"
+int controleJogo(Conexao *con, int numJogadores) {
+  Sala *sala = NULL;
+  con->ativo = 1;
+  getNomeJogador(con);
+  sala = procuraSala(con, numJogadores);
+  if(sala != NULL)
+    pthread_create(&sala->tSala, NULL, esperaSalaCheia, (void *)sala);
+  
+  while(con->ativo) { sleep(1); }
+  con->ativo = 1;
+  if(sala != NULL)
+    pthread_create(&sala->tSala, NULL, iniciaJogo, (void *)sala);
+  while(con->ativo) { sleep(1); }
   return 0;
 }
 
-void *gerenciaSalaJogo(void *tsalaJogo) {
-  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
-  Pergunta *perguntas = selecionaPerguntas();
-  char buf[MAXDATASIZE];
+//Inicia o jogo, enviando as perguntas, alternativas e recebendo as respostas
+void *iniciaJogo(void *tsala) {
+  Sala *sala = (Sala *)tsala;
+  sala->perg = selecionaPerguntas();
+  Pergunta *p = sala->perg;
+  SalaJogo *salaJogo = NULL;
+  char buf[MAXDATASIZE], aux[MAXDATASIZE];
+  pthread_t tJogoRecebe[sala->numJogadores];
+  int i, j, k;
+  zeraPontos(sala);
   
-  aguardaJogadores(salaJogo);
-  enviarPerguntas(salaJogo, perguntas);
-
-  return 0;
-}
-
-int enviarPerguntas(SalaJogo *salaJogo, Pergunta *perguntas) {
-  salaJogo->perg = perguntas;
-  Pergunta *p = salaJogo->perg;
-  char buf[MAXDATASIZE];
-  pthread_t con1, con2;
-  int receiv, rc;
-  int i = 0;
-  receiv = verificaRecebimento(salaJogo); //Msg de controle para estabelecer sincronização entre as conexões na Sala
-
-  salaJogo->receiv = 0;
-  salaJogo->jogoFim = 0;
-  salaJogo->con1->pontos = 0;
-  salaJogo->con2->pontos = 0;
-  rc = pthread_create(&con1, NULL, controlaJogo1, (void *)salaJogo);
-  rc = pthread_create(&con2, NULL, controlaJogo2, (void *)salaJogo);
-  
-  while(p != NULL && i < 1) {
-    //Envie o enunciado da pergunta
+  while(p != NULL && k<2) {
     sprintf(buf, "\n%s\n\n", p->pergunta);
-    enviaMsgSalaJogo(salaJogo, buf);
-  
-    //receiv = verificaRecebimento(salaJogo);
-    enviaAlternativas(salaJogo, p);
+    enviaMsgSala(sala, buf, EXIBE_MSG, COK);
+    verificaRecebimento(sala);
     
-    //Recebe resposta
-    //receiv = verificaRecebimento(salaJogo, buf);
-    //sockReceiv = recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0);
-    sleep(1);
-    pthread_mutex_lock(&mutexsum);
-    salaJogo->receiv = 1;
-    salaJogo->sidResp = 0;
-    salaJogo->con1Resp = 0;
-    salaJogo->con2Resp = 0;
-    pthread_mutex_unlock(&mutexsum);
-    while(salaJogo->sidResp == 0) {
-      if(salaJogo->con1Resp == 1 && salaJogo->con2Resp == 1) 
-	break;
-      sleep(1);
-    }
-    pthread_mutex_lock(&mutexsum);
-    if(salaJogo->sidResp != 0) adicinaPonto(salaJogo);
-    if(salaJogo->con1Resp == 1 && salaJogo->sidResp != salaJogo->con1->sid) removePonto(salaJogo->con1);
-    if(salaJogo->con2Resp == 1 && salaJogo->sidResp != salaJogo->con2->sid) removePonto(salaJogo->con2);
-    salaJogo->receiv = 0;
-    salaJogo->sidResp = 0;
-    pthread_mutex_unlock(&mutexsum);
+    enviaAlternativas(sala, p);
+    verificaRecebimento(sala);
+    
+    enviaMsgSala(sala, "", JOGA, COK);
+    verificaRecebimento(sala);
+    
+    for(i=0; i<sala->numJogadores; i++) {
+      salaJogo = novaSalaJogo(sala, i);
+      pthread_create(&tJogoRecebe[i], NULL, jogoRecebe, (void *)salaJogo);
+    }    
+    
+    sala->id = -1;
+    ativaVerifica(sala);
+    while(verificaAtivo(sala) == -1 && sala->id == -1) { sleep(1); }
+    desativaVerifica(sala);
+    for(i=0; i<sala->numJogadores; i++)
+      pthread_cancel(tJogoRecebe[i]);
+    enviaMsgSala(sala, "", NONE, CFF);
+    verificaRecebimento(sala);
+    
+    enviaMsgSala(sala, "", NONE, COK);
+    verificaRecebimento(sala);
     p = p->prox;
-    salaJogo->perg = p;
-    i++;
+    sala->perg = p;
+    k++;
   }
-  pthread_mutex_lock(&mutexsum);
-  salaJogo->jogoFim = 1;
-  pthread_mutex_unlock(&mutexsum);
-  enviaMsgVencedor(salaJogo);
+  int vid = enviaMsgVenceu(sala);
+  verificaRecebimento(sala);
   
-  sprintf(buf, "Você, socket %d marcou %d pontos\n\n", salaJogo->con1->sid, salaJogo->con1->pontos);
-  send(salaJogo->con1->sid, buf, strlen(buf)+1, 0);
-  sprintf(buf, "Você, socket %d marcou %d pontos\n\n", salaJogo->con2->sid, salaJogo->con2->pontos);
-  send(salaJogo->con2->sid, buf, strlen(buf)+1, 0);
-  sleep(1);
-  enviaMsgSalaJogo(salaJogo, "eog"); //End of Game
-
-  sprintf(buf, "%d", TELA_INICIAL);
-  enviaMsgSalaJogo(salaJogo, buf);
-
-  pthread_mutex_lock(&mutexsum);
-  salaJogo->con1->ctJogo = 0;
-  salaJogo->con2->ctJogo = 0;
-  pthread_mutex_unlock(&mutexsum);
-  return 0;
+  adicionaRank(sala->con[vid]->nome, sala->con[vid]->pontos);
+  
+  enviaMsgSala(sala, "", TELA_INICIAL, COK);
+  verificaRecebimento(sala);
+  atualizaSalaEstado(sala, TELA_INICIAL);
+  
+  desativaSala(sala);
+  sala->deleta = 1;
+  deletaSala();
+  free(sala->perg);
+  free(sala);
+  pthread_exit(NULL);
 }
 
-int removePonto(Conexao *con) {
-  con->pontos -= 9;
-  return 0;
-}
+//Recebe uma resposta para cada alternativa de cada jogador
+void *jogoRecebe(void *tsalaJogo) {
+  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
+  char buf[MAXDATASIZE], aux[MAXDATASIZE];
+  int sid, id;
+  id = salaJogo->id;
+  sid = salaJogo->sala->con[id]->sid;
 
-int enviaMsgVencedor(SalaJogo *salaJogo) {
-  char buf[MAXDATASIZE];
-  int venc;
-  
-  venc = salaJogo->con1->pontos;
-  if(venc == salaJogo->con2->pontos) {
-    sprintf(buf, "\nO socket %d e %d empatou com %d pontos!!\n", salaJogo->con1->sid, salaJogo->con2->sid, salaJogo->con2->pontos);
-    enviaMsgSalaJogo(salaJogo, buf);
-  } else if(venc < salaJogo->con2->pontos) {
-    sprintf(buf, "\nO socket %d venceu a partida com %d pontos!!\n", salaJogo->con2->sid, salaJogo->con2->pontos);
-    enviaMsgSalaJogo(salaJogo, buf);
+  recv(sid, buf, MAXDATASIZE, 0);
+  deserializeKTCPDados(buf, aux);
+    
+  if(verificaResposta(salaJogo->sala->perg, aux)) {
+    if(salaJogo->sala->id == -1) {
+      pthread_mutex_lock(&mutexsum);
+      salaJogo->sala->id = id;
+      pthread_mutex_unlock(&mutexsum);
+    }
+    salaJogo->sala->con[id]->pontos += PONTOS_ACERTO;
+    sprintf(buf, "\nO jogador %s acertou e ganhou %d pontos!\n", salaJogo->sala->con[id]->nome, PONTOS_ACERTO);
+    enviaMsgSalaLess(salaJogo->sala, sid, buf, NONE, NONE);
+    sprintf(buf, "\nVoce acertou e ganhou %d pontos!\n", PONTOS_ACERTO);
   } else {
-    sprintf(buf, "\nO socket %d venceu a partida com %d pontos!!\n", salaJogo->con1->sid, salaJogo->con1->pontos);
-    enviaMsgSalaJogo(salaJogo, buf);
+    sprintf(buf, "\nVoce errou e perdeu %d pontos!\n", -1*PONTOS_ERRO);
+    salaJogo->sala->con[id]->pontos += PONTOS_ERRO;
   }
+  serializeKTCP(aux, NONE, NONE, NONE, buf);
+  enviaMsg(salaJogo->sala->con[id], aux);
+  salaJogo->sala->verifica[id] = 0;
 
-  return 0;
-}
-
-void *controlaJogo1(void *tsalaJogo) {  
-  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
-  char buf[MAXDATASIZE];
-
-  while(!salaJogo->jogoFim) {
-    if(salaJogo->receiv) {
-      if(!salaJogo->con1Resp) {
-	//Recebe a resposta da Pergunta
-	recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0);
-
-	if(strcmp(buf, "") != 0) {
-	  if(salaJogo->sidResp == 0 && verificaResposta(salaJogo->perg, tolower(buf[0]))) {
-	    pthread_mutex_lock(&mutexsum);
-	    salaJogo->sidResp = 1;
-	    pthread_mutex_unlock(&mutexsum);
-	    sprintf(buf, "\nResposta [%c] Correta!\n", buf[0]);
-	  } 
-	  else sprintf(buf, "\nResposta [%c] Errada!\n", buf[0]);
-	  send(salaJogo->con1->sid, buf, strlen(buf)+1, 0);
-	}
-	pthread_mutex_lock(&mutexsum);
-	salaJogo->con1Resp = 1;
-	pthread_mutex_unlock(&mutexsum);
-      }
-    }
-    sleep(1);
-  }
   pthread_exit(NULL);
 }
 
-void *controlaJogo2(void *tsalaJogo) {  
-  SalaJogo *salaJogo = (SalaJogo *)tsalaJogo;
-  char buf[MAXDATASIZE];
+//Indica que o jogo em determinada Sala terminou e a sala pode ser deletada
+int deletaSala() {
+  pthread_mutex_lock(&mutexsum);
+  Sala *aux = listaSala;
+  if(aux->deleta == 1) {
+    listaSala = aux->prox;
+    return 0;
+  }
+  while(aux->prox->deleta == 0)
+    aux = aux->prox;
+  aux->prox = aux->prox->prox;
+  pthread_mutex_unlock(&mutexsum);
+  return 0;
+}
 
-  while(!salaJogo->jogoFim) {
-    if(salaJogo->receiv) {
-      if(!salaJogo->con2Resp) {
-	//Recebe a resposta da Pergunta
-	recv(salaJogo->con2->sid, buf, MAXDATASIZE, 0);
-	
-	if(!salaJogo->con2Resp && strcmp(buf, "") != 0) {
-	  if(salaJogo->sidResp == 0 && verificaResposta(salaJogo->perg, tolower(buf[0]))) {
-	    pthread_mutex_lock(&mutexsum);
-	    salaJogo->sidResp = 2;
-	    pthread_mutex_unlock(&mutexsum);
-	    sprintf(buf, "\nResposta [%c] Correta!\n", buf[0]);
-	  } 
-	  else sprintf(buf, "\nResposta [%c] Errada!\n", buf[0]);
-	  send(salaJogo->con2->sid, buf, strlen(buf)+1, 0);
-	}
-	pthread_mutex_lock(&mutexsum);
-	salaJogo->con2Resp = 1;
-	pthread_mutex_unlock(&mutexsum);
-      }
+//Atualiza a maquina de estados de todos os jogadores em uma Sala
+int atualizaSalaEstado(Sala *sala, int estado) {
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    sala->con[i]->estado = estado;
+  return 0;
+}
+
+//Envia uma mensagem para todos da sala indicando o vencedor da sala
+int enviaMsgVenceu(Sala *sala) {
+  int i, vid, pontos;
+  char buf[MAXDATASIZE];
+  vid = 0;
+  pontos = sala->con[vid]->pontos;
+  for(i=1; i<sala->numJogadores; i++) {
+    if(sala->con[i]->pontos > pontos) {
+      pontos = sala->con[i]->pontos;
+      vid = i;
     }
-    sleep(1);
   }
-  pthread_exit(NULL);
+  sprintf(buf, "\nO jogador %s é o vencedor com %d pontos. Parabeins!!\n", sala->con[vid]->nome, pontos);
+  enviaMsgSala(sala, buf, EXIBE_MSG, COK);
+  return vid;
 }
 
-int adicinaPonto(SalaJogo *salaJogo) {
-  if(salaJogo->sidResp == 1)
-    salaJogo->con1->pontos += 17;
-  else if(salaJogo->sidResp == 2)
-    salaJogo->con2->pontos += 17;
-
-  return 0;
-}
-
-int verificaRecebimento(SalaJogo *salaJogo) {
+//Verifica o recebimento dos pacotes enviados pelos jogadores de uma sala
+int verificaRecebimento(Sala *sala) {
   char buf[MAXDATASIZE];
-  int i = 0;
-  
-  while(1) {
-    if(recv(salaJogo->con1->sid, buf, MAXDATASIZE, 0) != -1)
-      i++;
-    if(recv(salaJogo->con2->sid, buf, MAXDATASIZE, 0) != -1)
-      i++;
-    if(i == 2)
-      break;
-      
-    sleep(1);
-  }
-  
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    recv(sala->con[i]->sid, buf, MAXDATASIZE, 0);
   return 0;
 }
 
-int enviaAlternativas(SalaJogo *salaJogo, Pergunta *p) {
-  int i = 'A';
+//Zera os pontos dos jogadores de uma sala
+int zeraPontos(Sala *sala) {
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    sala->con[i]->pontos = 0;
+   return 0;
+}
+
+//Verifica se os jogadores em uma sala estao ativo (controle de pergunta-resposta)
+int verificaAtivo(Sala *sala) {
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    if(sala->verifica[i] == 1)
+      return -1;
+  return 0;
+}
+
+//Verifica se o jogo terminou, entre outras coisas
+int verificaJogoAtivo(Sala *sala) {
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    if(sala->ativo[i] == 1)
+      return -1;
+  return 0;
+}
+
+int ativaVerifica(Sala *sala) {
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    sala->verifica[i] = 1;
+  return 0;
+}
+
+int desativaVerifica(Sala *sala) {
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    sala->verifica[i] = 0;
+  return 0;
+}
+
+int ativaJogo(Sala *sala) {
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    sala->ativo[i] = 1;
+  return 0;
+}
+
+int desativaJogo(Sala *sala) {
+  int i;
+  for(i=0; i<sala->numJogadores; i++)
+    sala->ativo[i] = 0;
+  return 0;
+}
+
+int enviaAlternativas(Sala *sala, Pergunta *p) {
   char buf[MAXDATASIZE];
   Alternativa *aux = p->alt;
-
-  //Envia a alternativa da pergunta
   sprintf(buf, "A) %s\nB) %s\nC) %s\nD) %s\n", aux->alternativa, aux->prox->alternativa, aux->prox->prox->alternativa, aux->prox->prox->prox->alternativa);
-  enviaMsgSalaJogo(salaJogo, buf);
-
+  enviaMsgSala(sala, buf, EXIBE_MSG, COK);
   return 0;
 }
 
-Pergunta *selecionaPerguntas() {
-  Pergunta *p = listaPergunta;
-  return p;
+SalaJogo *novaSalaJogo(Sala *sala, int id) {
+  SalaJogo *novo = (SalaJogo *)malloc(sizeof(SalaJogo));
+  novo->id = id;
+  novo->sala = sala;
+  return novo;
 }
 
-int aguardaJogadores(SalaJogo *salaJogo) {
-  char buf[MAXDATASIZE];
-  int i, j;
-
+void *esperaSalaCheia(void *tsala) {
+  Sala *sala = (Sala *)tsala;
+  SalaChat *salaChat = NULL;
+  char buf[MAXDATASIZE], aux[MAXDATASIZE];
+  int i, j, k;
+  pthread_t tChatRecebe[sala->numJogadores];
+  k = 0;
   j = 0;
   while(1) {
-    i = numJogadoresSalaJogo(salaJogo);
-    sprintf(buf, "Aguardando jogadores! [%d/2]\n", i);
-    
+    i = getSalaNumJogadores(sala);
+    sprintf(buf, "\nAguardando jogadores! [%d/%d]\n", i, sala->numJogadores);
     if(j != i) {
-      enviaMsgSalaJogo(salaJogo, buf);
+      enviaMsgSala(sala, buf, ESPERA_SALA_CHEIA, NONE);
+      salaChat = novaSalaChat(sala, k);
+      pthread_create(&tChatRecebe[k], NULL, chatRecebe, (void *)salaChat);
+      k++;
       j = i;
     }
 
-    if(i == 2)
+    if(i == sala->numJogadores)
       break;
+    sleep(1);
   }
-  strcpy(buf, NP);
-  enviaMsgSalaJogo(salaJogo, buf);
-
-  return 0;
+  enviaCooldown(sala, 3);  
+  enviaMsgSala(sala, aux, ESPERA_SALA_CHEIA, CFT);
+  for(k=0; k<sala->numJogadores; k++)
+    pthread_cancel(tChatRecebe[k]);
+  desativaSala(sala);
+  pthread_exit(NULL);
 }
 
-int enviaMsgSalaJogo(SalaJogo *salaJogo, char msg[MAXDATASIZE]) {
-  pthread_mutex_lock(&mutexsum);
-  if(salaJogo->con1 != NULL)
-    send(salaJogo->con1->sid, msg, strlen(msg)+1, 0);
-  if(salaJogo->con2 != NULL)
-    send(salaJogo->con2->sid, msg, strlen(msg)+1, 0);
-  pthread_mutex_unlock(&mutexsum);
-  sleep(1);
-  
-  return 0;
-}
-
-int numJogadoresSalaJogo(SalaJogo *salaJogo) {
-  int i = 0;
-  pthread_mutex_lock(&mutexsum);
-  if(salaJogo->con1 != NULL)
-    i++;
-  if(salaJogo->con2 != NULL)
-    i++;
-  pthread_mutex_unlock(&mutexsum);
-  return i;
-}
-
-int verificaSalaJogo(Conexao *con, int numJogadores) {
-  SalaJogo *salaAux = salaJogo2;
+int desativaSala(Sala *sala) {
   int i;
+  pthread_mutex_lock(&mutexsum);
+  for(i=0; i<sala->numJogadores; i++)
+    sala->con[i]->ativo = 0;
+  pthread_mutex_unlock(&mutexsum);
+  return 0;
+}
 
-  if(numJogadores == 2) {
-    while(salaAux != NULL) {
-      if(salaAux->con2 == NULL) {
-	salaAux->con2 = con;
-	return 0;
-      }
-      salaAux = salaAux->prox;
+int enviaCooldown(Sala *sala, int segundos) {
+  char buf[MAXDATASIZE];
+  int i = segundos;
+  while(i != 0) {
+    sprintf(buf, "O jogo começara em %d segundos.\n", i);
+    enviaMsgSala(sala, buf, ESPERA_SALA_CHEIA, NONE);
+    i--;
+    sleep(1);
+  }
+  return 0;
+}
+
+//Envia mensagem para todos os jogadores de uma sala
+int enviaMsgSala(Sala *sala, char buf[MAXDATASIZE], int tela, int controle) {
+  char aux[MAXDATASIZE];
+  int i;
+  for(i=0; i<sala->numJogadores; i++) {
+    if(sala->con[i] != NULL) {
+      serializeKTCP(aux, tela, controle, NONE, buf);
+      enviaMsg(sala->con[i], aux);
     }
   }
+  return 0;
+}
 
+//Envia mensagem para todos os jogadores de uma sala menos o sid (socket id) indicado
+int enviaMsgSalaLess(Sala *sala, int sid, char buf[MAXDATASIZE], int tela, int controle) {
+  char aux[MAXDATASIZE];
+  int i;
+  for(i=0; i<sala->numJogadores; i++) {
+    if(sala->con[i] != NULL && sala->con[i]->sid != sid) {
+      serializeKTCP(aux, tela, controle, NONE, buf);
+      enviaMsg(sala->con[i], aux);
+    }
+  }
+  return 0;
+}
+
+int getSalaNumJogadores(Sala *sala) {
+  int i, j;
+  for(i=0, j=0; i<sala->numJogadores; i++)
+    if(sala->con[i] != NULL)
+      j++;
+    
+  return j;
+}
+
+Sala *procuraSala(Conexao *con, int numJogadores) {
+  Sala *sala = NULL;
+  pthread_mutex_lock(&mutexsum);
+  if(listaSala == NULL) {
+    sala = insereSalaInicio(con, numJogadores);
+  } else {
+    int n;
+    if(n=procuraVagaSala(con, numJogadores) == -1)
+      sala = insereSalaFinal(con, numJogadores);
+  }
+  pthread_mutex_unlock(&mutexsum);
+  return sala;
+}
+
+int procuraVagaSala(Conexao *con, int numJogadores) {
+  Sala *aux = listaSala;
+  int i;
+  while(aux != NULL) {
+    if(aux->numJogadores == numJogadores)
+      for(i=1; i<numJogadores; i++) {
+	if(aux->con[i] == NULL) {
+	  con->salaId = i;
+	  aux->con[i] = con;
+	  return 0;
+	}
+      }
+    aux = aux->prox;
+  }
   return -1;
 }
 
-int criaSalaJogo(Conexao *con, int numJogadores) {
-  pthread_mutex_lock(&mutexsum);
-  if(salaJogo2 == NULL) {
-    salaJogo2 = insereSalaJogoInicio(con);
-  } else {
-    insereSalaJogoFinal(salaJogo2, con);
-  }
-  pthread_mutex_unlock(&mutexsum);
-  return 0;
+Sala *insereSalaFinal(Conexao *con, int numJogadores) {
+  Sala *aux = getUltimaSala();
+  while(aux->prox != NULL) aux = aux->prox;
+  Sala *novo = novaSala(con, numJogadores);
+  aux->prox = novo;
+  return novo;
 }
 
-SalaJogo *getUltimaSalaJogo() {
-  SalaJogo *aux = salaJogo2;
+Sala *insereSalaInicio(Conexao *con, int numJogadores) {
+  Sala *novo = novaSala(con, numJogadores);
+  listaSala = novo;
+  return novo;
+}
+
+Sala *novaSala(Conexao *con, int numJogadores) {
+  Sala *novo = (Sala *)malloc(sizeof(Sala));
+  int i;
+  con->salaId = 0;
+  novo->con[0] = con;
+  for(i=1; i<MAXJOGADORSALA-1; i++)
+    novo->con[i] = NULL;
+  novo->deleta = 0;
+  novo->numJogadores = numJogadores;
+  novo->prox = NULL;
+  return novo;
+}
+
+Sala *getUltimaSala() {
+  Sala *aux = listaSala;
   while(aux->prox != NULL) aux = aux->prox;
   return aux;
 }
 
-//Função que insere no final da lista ligada das Perguntas, uma pergunta
-int insereSalaJogoFinal(SalaJogo *ini, Conexao *con) {
-  SalaJogo *aux = ini;
-  while(aux->prox != NULL) aux = aux->prox;
-  SalaJogo *novo = novaSalaJogo(con);
-  aux->prox = novo;
-  
+int getNomeJogador(Conexao *con) {
+  char buf[MAXNOMESIZE];
+  recv(con->sid, buf, MAXNOMESIZE, 0);
+  deserializeKTCPDados(buf, con->nome);
   return 0;
 }
 
-//Função que insere no início (cabeça) da lista ligada Perguntas
-//Retorna um ponteiro para a cabeça
-SalaJogo *insereSalaJogoInicio(Conexao *con) {
-  SalaJogo *novo = novaSalaJogo(con);
+/***********************************************************
+************************** Chat ****************************
+***********************************************************/
+
+//Cria um simples chat para os jogadores conversarem
+//enquanto esperam a sala encher
+SalaChat *novaSalaChat(Sala *sala, int id) {
+  SalaChat *novo = (SalaChat *)malloc(sizeof(SalaChat));
+  novo->id = id;
+  novo->sala = sala;
   return novo;
 }
 
-//Função responsável por criar um "Nó" para ser colocado na lista ligada das Perguntas
-//Retorna um ponteiro para o Nó criado
-SalaJogo *novaSalaJogo(Conexao *con) {
-  SalaJogo *novo = malloc(sizeof(SalaJogo));
-  novo->con1 = con;
-  novo->con2 = NULL;
-  novo->prox = NULL;
+void *chatRecebe(void *tsalaChat) {
+  SalaChat *salaChat = (SalaChat *)tsalaChat;
+  char buf[MAXDATASIZE], aux[MAXDATASIZE];
+  int sid = salaChat->sala->con[salaChat->id]->sid;
+  char nome[MAXNOMESIZE];
+  strcpy(nome, salaChat->sala->con[salaChat->id]->nome);
   
-  return novo;
+  while(1) {
+    recv(sid, buf, MAXDATASIZE, 0);
+    deserializeKTCPDados(buf, aux);
+    if(strcmp(aux, "") != 0) {
+      sprintf(buf, "%s, diz: %s\n", nome, aux);
+      enviaMsgSala(salaChat->sala, buf, ESPERA_SALA_CHEIA, NONE);
+    }
+  }
+  pthread_exit(NULL);
 }
 
-/*****************************
-************ TELA ************
-******************************/
-int telaInical(Conexao *con) {
-  char buf[MAXDATASIZE];
-  int numbytes;
-  
-  sprintf(buf, "%d", TELA_INICIAL);
-  numbytes = send(con->sid, buf, strlen(buf)+1, 0);
 
+/***********************************************************
+************************ Controles *************************
+***********************************************************/
+
+//Envia mensagem pedindo confirmacao de recebimento
+int enviaMsgCR(Conexao *con, char buf[MAXDATASIZE]) {
+  while(1) {
+    send(con->sid, buf, strlen(buf)+1, 0);
+    recv(con->sid, buf, MAXDATASIZE, 0);
+    if(deserializeKTCPControle(buf) == CYEP)
+      break;
+  }
   return 0;
 }
 
-int selecionaJogo(Conexao *con) {
-  char buf[MAXDATASIZE];
-  int numbytes;
-  
-  sprintf(buf, "%d", SELECIONA_JOGO);
-  numbytes = send(con->sid, buf, strlen(buf)+1, 0);
-
-  return 0;  
+int enviaMsg(Conexao *con, char buf[MAXDATASIZE]) {
+  send(con->sid, buf, strlen(buf)+1, 0);
+  return 0;
 }
 
-int exibeRank(int sockfd) {
+
+void *controleRecebe(void *tcon) {
+  Conexao *con = (Conexao *)tcon;
+  char buf[MAXDATASIZE];
+  
+  while(1) {
+    recv(con->sid, buf, MAXDATASIZE, 0);
+  }
+ 
+  pthread_exit(NULL);
+}
+
+
+/***********************************************************
+************ Kuizz Transfer Control Protocol ***************
+***********************************************************/
+
+//Serializa o protocolo de aplicacao
+int serializeKTCP(char buf[MAXDATASIZE], int tela, int controle, int proxEstado, char dados[MAXDATASIZE]) {
+  sprintf(buf, "%3d%1d%1d%s", tela, controle, proxEstado, dados);
+  return 0;
+}
+
+int deserializeKTCPTela(char buf[MAXDATASIZE]) {
+  char aux[MAXDATASIZE];
+  sprintf(aux, "%1c%1c%1c", buf[0], buf[1], buf[2]);
+  return atoi(aux);
+}
+
+int deserializeKTCPControle(char buf[MAXDATASIZE]) {
+  char aux[MAXDATASIZE];
+  sprintf(aux, "%1c", buf[3]);
+  return atoi(aux);
+}
+
+int deserializeKTCPProxEstado(char buf[MAXDATASIZE]) {
+  char aux[MAXDATASIZE];
+  sprintf(aux, "%1c", buf[4]);
+  return atoi(aux);
+}
+
+int deserializeKTCPDados(char buf[MAXDATASIZE], char destino[MAXDATASIZE]) {
+  substring(buf, 5, strlen(buf)-5, destino);
+  return 0;
+}
+
+
+/***********************************************************
+************************* Telas ****************************
+***********************************************************/
+
+int getExibeRank(char aux[MAXDATASIZE]) {
     char buf[MAXDATASIZE];
     int retval, row, i;
     sqlite3 *handle;
@@ -681,12 +804,13 @@ int exibeRank(int sockfd) {
     
     retval = sqlite3_open("kizz.sqlite", &handle);
     
-    retval = sqlite3_prepare_v2(handle, "SELECT r.nome, r.pontos FROM Rank r ORDER BY r.pontos;", -1, &stmt, 0);
+    retval = sqlite3_prepare_v2(handle, "SELECT r.nome, r.pontos FROM Rank r ORDER BY r.pontos DESC LIMIT 10;", -1, &stmt, 0);
     if(retval) {
       perror("SELECT database");
       return 0;
     }
     
+    strcpy(aux, "\n");
     i = 0;
     row = 0;
     while(1) {
@@ -694,10 +818,8 @@ int exibeRank(int sockfd) {
       
       if(retval == SQLITE_ROW) {
 	//Processo encarregado de guardar na lista ligada determinada Pergunta e suas Alternativas com a quantidade constante definida por NUM_ALTERNATIVAS 
-	sprintf(buf, "%s\t%s", sqlite3_column_text(stmt, 0), sqlite3_column_text(stmt, 1));
-	send(sockfd, buf, strlen(buf)+1, 0);
-	
-	recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
+	sprintf(buf, "%s\t\t%s\n", sqlite3_column_text(stmt, 0), sqlite3_column_text(stmt, 1));
+	strcat(aux, buf);
       }
       //Caso não haja mais registros a serem lidos ele executará o break;
       else if(retval == SQLITE_DONE) break;
@@ -708,17 +830,8 @@ int exibeRank(int sockfd) {
     }
     //Fecha conexão
     sqlite3_close(handle);
-    
-    strcpy(buf, "eor");
-    send(sockfd, buf, strlen(buf)+1, 0);
-    
-    recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
-
-    strcpy(buf, "Nome\tPontos");
-    send(sockfd, buf, strlen(buf)+1, 0);
-  
-  recv(sockfd, buf, MAXDATASIZE, 0); //Confirmação/Espera de recebimento (No Problem)
-
+    strcpy(buf, "Nome\t\t\tPontos\n");
+    strcat(aux, buf);
     return 0;
 }
 
@@ -727,7 +840,6 @@ int adicionaRank(char *nome, int pontos) {
   int retval;
   sqlite3 *handle;
   char sql[250];
-   
   retval = sqlite3_open("kizz.sqlite", &handle);
   
   sprintf(sql, "INSERT INTO Rank (nome, pontos) VALUES ('%s', %d);", nome, pontos);
@@ -737,51 +849,10 @@ int adicionaRank(char *nome, int pontos) {
   return 1;
 }
 
-int verificaResposta(Pergunta *p, int n) {
-  Alternativa *aux = p->alt;
-  int i;
 
-  n = n - 'a';
-  for(i=0; i<n && aux->prox != NULL; i++) {
-    aux = aux->prox;
-  }
-  
-  return aux->correta;
-}
-
-Pergunta *sorteiaPergunta(Pergunta *ini) {
-  int i, n;
-  Pergunta *aux = ini->prox;
-  
-  n = randomN(listaSize(ini));
-  for(i=0; i<n-1; i++) aux = aux->prox;
-  
-  return aux;
-}
-
-//Gera um número aleatório de 0 até N
-//Autor: Guilherme G Moreira
-int randomN(int n) {
-  int r = random()/(RAND_MAX / n);
-  return r;
-}
-
-int listaSize(Pergunta  *ini) {
-  int i;
-  Pergunta *aux = ini;
-  i = 0;
-  while(aux != NULL) {
-    aux = aux->prox;
-    i++;
-  }
-
-  return i;
-}
-
-int charToint(char c) {
-  return c - 'a';
-}
-
+/***********************************************************
+************************* Pergunta *************************
+***********************************************************/
 
 //Função que controla a listagem de todas as perguntas e suas devidas alternativas no bando de dados
 //Retorna uma lista ligada de Perguntas
@@ -836,33 +907,35 @@ Pergunta *listaPerguntas(Pergunta *ini) {
     return ini;
 }
 
-//Função que insere no final da lista ligada das Conexao, uma pergunta
-Conexao *insereConexaoFinal(Conexao *ini, int sid, int estado) {
-  Conexao *aux = ini;
-  while(aux->prox != NULL) aux = aux->prox;
-  Conexao *novo = novaConexao(sid, estado);
-  aux->prox = novo;
-  return novo;
+Pergunta *selecionaPerguntas() {
+  Pergunta *p = listaPergunta;
+  return p;
 }
 
-//Função que insere no início (cabeça) da lista ligada Conxao
-//Retorna um ponteiro para a cabeça
-Conexao *insereConexaoInicio(int sid, int estado) {
-  Conexao *novo = novaConexao(sid, estado);
-  return novo;
+//Verifica a resposta para determinada pergunta
+int verificaResposta(Pergunta *p, char c[MAXDATASIZE]) {
+  Alternativa *aux = p->alt;
+  int i, n;
+  n = tolower(c[0]) - 'a';
+  for(i=0; i<n && aux->prox != NULL; i++) {
+    aux = aux->prox;
+  }
+  if(aux == NULL)
+    return 0;
+  return aux->correta;
 }
 
-//Função responsável por criar um "Nó" para ser colocado na lista ligada das Conexao
-//Retorna um ponteiro para o Nó criado
-Conexao *novaConexao(int sid, int estado) {
-  Conexao *novo = malloc(sizeof(Conexao));
-  novo->sid = sid;
-  novo->estado = estado;
-  novo->prox = NULL;
-  
-  return novo;
-}
+int listaSize(Pergunta  *ini) {
+  int i;
+  Pergunta *aux = ini;
+  i = 0;
+  while(aux != NULL) {
+    aux = aux->prox;
+    i++;
+  }
 
+  return i;
+}
 
 //Função que insere no final da lista ligada das Perguntas, uma pergunta
 int inserePerguntaFinal(Pergunta *ini, const unsigned char *p) {
@@ -890,6 +963,19 @@ Pergunta *novaPergunta(const unsigned char *p) {
   
   return novo;
 }
+
+//Função responsável por pegar o último Nó de uma lista ligada das Perguntas
+//Retorna um ponteiro para o último nó
+Pergunta *getUltimaPergunta(Pergunta *ini) {
+  Pergunta *aux = ini;
+  while(aux->prox != NULL) aux = aux->prox;
+  return aux;
+}
+
+
+/***********************************************************
+************************* Alternativa **********************
+***********************************************************/
 
 //Função que controla a inserção das alternativas em determina Pergunta
 int insereAlternativa(Pergunta *pergunta, const unsigned char *p, int correct, int i) {
@@ -928,34 +1014,54 @@ Alternativa *novaAlternativa(const unsigned char *p, int correct, int i) {
   return novo;
 }
 
-//Função responsável por pegar o último Nó de uma lista ligada das Perguntas
-//Retorna um ponteiro para o último nó
-Pergunta *getUltimaPergunta(Pergunta *ini) {
-  Pergunta *aux = ini;
+
+/***********************************************************
+************************* Conexao **************************
+***********************************************************/
+
+//Função que insere no final da lista ligada das Conexao, uma pergunta
+Conexao *insereConexaoFinal(Conexao *ini, int sid, int estado) {
+  Conexao *aux = ini;
   while(aux->prox != NULL) aux = aux->prox;
-  return aux;
+  Conexao *novo = novaConexao(sid, estado);
+  aux->prox = novo;
+  return novo;
 }
 
-int recvtimeout(int s, char *buf, int len, int timeout)
-{
-  fd_set fds;
-  int n;
-  struct timeval tv;
-  
-  // set up the file descriptor set
-  FD_ZERO(&fds);
-  FD_SET(s, &fds);
-  
-  // set up the struct timeval for the timeout
-  tv.tv_sec = timeout;
-  tv.tv_usec = 0;
-  
-  // wait until timeout or data received
-  n = select(s+1, &fds, NULL, NULL, &tv);
-  
-  if (n == 0) return -2; // timeout!
-  if (n == -1) return -1; // error
+//Função que insere no início (cabeça) da lista ligada Conxao
+//Retorna um ponteiro para a cabeça
+Conexao *insereConexaoInicio(int sid, int estado) {
+  Conexao *novo = novaConexao(sid, estado);
+  return novo;
+}
 
-  // data must be here, so do a normal recv()
-  return recv(s, buf, len, 0);
+//Função responsável por criar um "Nó" para ser colocado na lista ligada das Conexao
+//Retorna um ponteiro para o Nó criado
+Conexao *novaConexao(int sid, int estado) {
+  Conexao *novo = malloc(sizeof(Conexao));
+  novo->sid = sid;
+  novo->estado = estado;
+  novo->prox = NULL;
+  
+  return novo;
+}
+
+
+/***********************************************************
+************************* Outros ***************************
+***********************************************************/
+
+//Gera um número aleatório de 0 até N
+int randomN(int n) {
+  int r = random()/(RAND_MAX / n);
+  return r;
+}
+
+int substring(char origem[MAXDATASIZE], int inicio, int quantidade, char destino[MAXDATASIZE]) {
+  int i;
+  for(i=0; i<=quantidade; i++, inicio++) {
+    destino[i] = origem[inicio];
+  }
+  destino[i+1] = '\0';
+  return 0;
 }
