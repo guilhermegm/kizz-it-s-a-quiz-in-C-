@@ -220,6 +220,7 @@ int iniciaJogo(int sid) {
   while(salaJogo->ativo) { sleep(1); }
 
   pthread_cancel(salaJogo->tSalaJogoRecebe);
+  free(salaJogo);
   return 0;
 }
 

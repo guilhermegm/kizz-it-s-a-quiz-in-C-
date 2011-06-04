@@ -24,6 +24,7 @@
 #define MAXDATASIZE 1200   // tamanho maximo do protocolo de aplicacao
 #define MAXNOMESIZE 20     // tamanho maximo do nome do jogador
 #define MAXJOGADORSALA 4   // o maximo de jogadores nas salas
+#define NUMPERGUNTAS 5     // quantas perguntas a serem enviadas por partida
 #define PONTOS_ACERTO 17   // pontos por pergunta, quando o jogador acerta
 #define PONTOS_ERRO -9     // pontos por pegunta, quando o jogador erra
 //End-Controles Gerais
@@ -64,7 +65,6 @@ typedef struct _alternativa {
 
 typedef struct _pergunta {
   unsigned char pergunta[200];
-
   struct _alternativa *alt;
   struct _pergunta *prox;
 }Pergunta;
@@ -106,6 +106,7 @@ Pergunta *listaPergunta;
 Conexao *listaConexao;
 Sala *listaSala;
 pthread_mutex_t mutexsum;
+pthread_t tComando;
 
 Pergunta *listaPerguntas(Pergunta *ini);
 Pergunta *inserePerguntaInicio(const unsigned char *p);
@@ -130,6 +131,8 @@ SalaChat *novaSalaChat(Sala *sala, int id);
 void *iniciaJogo(void *tsala);
 void *jogoRecebe(void *tsalaJogo);
 SalaJogo *novaSalaJogo(Sala *sala, int id);
+Pergunta *criaPerguntaCopia(Pergunta *p);
+void *trataComando(void *t);
 
 void sigchld_handler(int s)
 {
@@ -204,6 +207,8 @@ int main(void) {
    listaConexao = NULL;
    listaSala = NULL;
    
+   pthread_create(&tComando, NULL, trataComando, NULL);
+   
    printf("server: waiting for connections...\n");
     while(1) {  // main accept() loop
 	Conexao *con = NULL;
@@ -230,6 +235,19 @@ int main(void) {
 	pthread_create(&con->tEnvia, NULL, trataConexao, (void *)con);
     }
     return 0;
+}
+
+void *trataComando(void *t) {
+  char buf[MAXDATASIZE];
+  while(1) {
+    gets(buf);
+    if(strcmp(buf, "/rank") == 0) {
+      geraRankHtml();
+      printf("Arquivo rank.html gerado com sucesso!\n");
+    } else {
+      printf("Comando não encontrado.\n");
+    }
+  }
 }
 
 /***********************************************************
@@ -334,10 +352,10 @@ void *iniciaJogo(void *tsala) {
   SalaJogo *salaJogo = NULL;
   char buf[MAXDATASIZE], aux[MAXDATASIZE];
   pthread_t tJogoRecebe[sala->numJogadores];
-  int i, j, k;
+  int i, j;
   zeraPontos(sala);
   
-  while(p != NULL && k<2) {
+  while(p != NULL) {
     sprintf(buf, "\n%s\n\n", p->pergunta);
     enviaMsgSala(sala, buf, EXIBE_MSG, COK);
     verificaRecebimento(sala);
@@ -366,7 +384,6 @@ void *iniciaJogo(void *tsala) {
     verificaRecebimento(sala);
     p = p->prox;
     sala->perg = p;
-    k++;
   }
   int vid = enviaMsgVenceu(sala);
   verificaRecebimento(sala);
@@ -624,7 +641,6 @@ int getSalaNumJogadores(Sala *sala) {
 
 Sala *procuraSala(Conexao *con, int numJogadores) {
   Sala *sala = NULL;
-  pthread_mutex_lock(&mutexsum);
   if(listaSala == NULL) {
     sala = insereSalaInicio(con, numJogadores);
   } else {
@@ -632,7 +648,6 @@ Sala *procuraSala(Conexao *con, int numJogadores) {
     if(n=procuraVagaSala(con, numJogadores) == -1)
       sala = insereSalaFinal(con, numJogadores);
   }
-  pthread_mutex_unlock(&mutexsum);
   return sala;
 }
 
@@ -835,6 +850,46 @@ int getExibeRank(char aux[MAXDATASIZE]) {
     return 0;
 }
 
+int geraRankHtml() {
+    char buf[MAXDATASIZE];
+    int retval, row, i;
+    sqlite3 *handle;
+    sqlite3_stmt *stmt;
+    FILE *f = NULL;
+    f = fopen("rank.html", "w+");
+    
+    retval = sqlite3_open("kizz.sqlite", &handle);
+    
+    retval = sqlite3_prepare_v2(handle, "SELECT r.nome, r.pontos FROM Rank r ORDER BY r.pontos DESC;", -1, &stmt, 0);
+    if(retval) {
+      perror("SELECT database");
+      return 0;
+    }
+    
+    fputs("<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\"\n\"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">\n<html xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"pt-br\" xml:lang=\"pt-br\">\n<head>\n<meta http-equiv=\"Content-Type\" content=\"text/html; charset=iso-8859-1\" /> \n<title>Kuizz - Rank</title>\n</head>\n<body>\n<h1>Kuizz - Rank</h1>\n\n<table width='300' cellpadding='4' cellspacing='4' border='1'>\n<tr><th>Nome</th><th>Pontos</th></tr>\n", f);
+    i = 0;
+    row = 0;
+    while(1) {
+      retval = sqlite3_step(stmt);
+      
+      if(retval == SQLITE_ROW) {
+	//Processo encarregado de guardar na lista ligada determinada Pergunta e suas Alternativas com a quantidade constante definida por NUM_ALTERNATIVAS 
+	sprintf(buf, "<tr><td>%s</td><td align='center'>%s</td></tr>\n", sqlite3_column_text(stmt, 0), sqlite3_column_text(stmt, 1));
+	fputs(buf, f);
+      }
+      //Caso não haja mais registros a serem lidos ele executará o break;
+      else if(retval == SQLITE_DONE) break;
+      else {
+	perror("SELECT row");
+	return 0;
+      }
+    }
+    //Fecha conexão
+    sqlite3_close(handle);
+    fputs("</table>\n</body>\n</html>", f);
+    fclose(f);
+    return 0;
+}
 
 int adicionaRank(char *nome, int pontos) {
   int retval;
@@ -908,8 +963,63 @@ Pergunta *listaPerguntas(Pergunta *ini) {
 }
 
 Pergunta *selecionaPerguntas() {
-  Pergunta *p = listaPergunta;
+  Pergunta *p, *aux;
+  int t, h, i, j, k, l, r, m;
+  
+  t = getListaSize();
+  h = (int)(t / NUMPERGUNTAS);
+  j = NUMPERGUNTAS;
+  l = 0;
+  k = 0;
+  m = 0;
+  aux = listaPergunta;
+  p = NULL;
+  
+  for(i=0; i < t; i+=h) {
+    if(j != l) {
+      r = randomN(h) + i;
+      printf("r: %d\n", r);
+      fflush(stdout);
+      m += r;
+    } else {
+      m = t - m;
+      r = randomN(m) + i;
+    }
+    while(k < r) {
+      aux = aux->prox;
+      k++;
+    }
+    if(p == NULL)
+      p = criaPerguntaCopia(aux);
+    else
+      copiaPerguntaFinal(p, aux);
+    l++;
+  }
   return p;
+}
+
+int copiaPerguntaFinal(Pergunta *ini, Pergunta *p) {
+  Pergunta *aux = ini;
+  Pergunta *pCopia = criaPerguntaCopia(p);
+  while(aux->prox != NULL)
+    aux = aux->prox;
+  pCopia->prox = NULL;
+  aux->prox = pCopia;
+  return 0;
+}
+
+Pergunta *criaPerguntaCopia(Pergunta *p) {
+  Pergunta *aux = novaPergunta(p->pergunta);
+  Alternativa *auxAlt = p->alt;
+  aux->alt = auxAlt;
+  int i = 0;
+  while(i < NUM_ALTERNATIVAS) {
+    insereAlternativa(aux, auxAlt->alternativa, auxAlt->id, i);
+    auxAlt = auxAlt->prox;
+    i++;
+  }
+  aux->prox = NULL;
+  return aux;
 }
 
 //Verifica a resposta para determinada pergunta
@@ -925,9 +1035,9 @@ int verificaResposta(Pergunta *p, char c[MAXDATASIZE]) {
   return aux->correta;
 }
 
-int listaSize(Pergunta  *ini) {
+int getListaSize() {
   int i;
-  Pergunta *aux = ini;
+  Pergunta *aux = listaPergunta;
   i = 0;
   while(aux != NULL) {
     aux = aux->prox;
