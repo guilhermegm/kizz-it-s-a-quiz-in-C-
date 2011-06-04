@@ -17,6 +17,8 @@
 //Controles Gerais
 #define PORT "3490"   // pota que os usuarios irao se conectar
 #define BACKLOG 100   // quantas conexoes ficaram na fila
+#define MAXDATASIZE 1200   // tamanho maximo do protocolo de aplicacao
+#define NP "200 OK"
 //End-Controles Gerais
 
 //Controles da Maquina de Estado, utilizado no protoloco de aplicacao
