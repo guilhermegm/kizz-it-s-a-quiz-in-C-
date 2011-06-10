@@ -72,6 +72,7 @@ typedef struct _pergunta {
 typedef struct _conexao {
   pthread_t tEnvia;
   char nome[MAXNOMESIZE];
+  char conn[15];
   int sid;                 // socket id
   int estado;              // maquina de Estados
   int pontos;              // pontos atuais em determinado Jogo (Sala)
@@ -230,7 +231,7 @@ int main(void) {
 	} else {
 	  con = insereConexaoFinal(listaConexao, new_fd, TELA_INICIAL);
 	}
-	
+	strcpy(con->conn, s);
 	// Cria uma thread em uma lista para cada cliente conectado
 	pthread_create(&con->tEnvia, NULL, trataConexao, (void *)con);
     }
@@ -265,14 +266,15 @@ void *trataConexao(void *tcon) {
   con->estado = TELA_INICIAL;
   //pthread_create(&con->tRecebe, NULL, controleRecebe, (void *)con);
   
-  int i = 0;
-  while(!i) {
+  int eog = 0; //End of Game
+  while(!eog) {
     recv(con->sid, buf, MAXDATASIZE, 0);
-    i = trataRecebimento(con, buf);
+    eog = trataRecebimento(con, buf);
   }
-    
-  pthread_exit(NULL);
+  
   close(con->sid);
+  printf("server: terminated connection from %s\n", con->conn);
+  pthread_exit(NULL);
 }
 
 //Maquina de estado, controla em que parte do jogo o jogador 
@@ -298,6 +300,7 @@ int trataRecebimento(Conexao *con, char buf[MAXDATASIZE]) {
       serializeKTCP(buf, SAIR, COK, NONE, "");
       enviaMsgCR(con, buf);
       con->estado = SAIR;
+      return 1;
     }
   }
   else if(con->estado == SELECIONA_JOGO) {

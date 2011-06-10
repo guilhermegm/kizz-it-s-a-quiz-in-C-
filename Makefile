@@ -11,10 +11,6 @@ OBJETOS= cl.o sv.o
 PROGS= cl sv
 INC=  -I./
 
-#Compila todos
-all: $(PROGS) exe
-	
-
 #gera o executavel do projeto
 exe: $(OBJETOS) 
 	$(CC) cl.c -o cl -lsqlite3 -lpthread

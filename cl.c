@@ -148,10 +148,11 @@ void *controleEnvia(void *tsid) {
 void *controleRecebe(void *tsid) {
   int sid = (int)tsid;
   char buf[MAXDATASIZE];
+  int eog = 0; //End of Game
   
-  while(1) {
+  while(!eog) {
     recv(sid, buf, MAXDATASIZE, 0);
-    trataRecebimento(sid, buf);
+    eog = trataRecebimento(sid, buf);
   }
  
   pthread_exit(NULL);
@@ -178,6 +179,10 @@ int trataRecebimento(int sid, char buf[MAXDATASIZE]) {
       deserializeKTCPDados(buf, aux);
       exibeMsg(aux);
       fflush(stdout);
+    }
+    else if(tela == SAIR) {
+      exibeTelaSair();
+      return 1;
     }
     else if(tela == SELECIONA_JOGO) {
       exibeSelecionaJogo();
@@ -359,6 +364,12 @@ int substring(char origem[MAXDATASIZE], int inicio, int quantidade, char destino
 int exibeTelaInicial() {
   char buf[MAXDATASIZE];
   printf("\nKUIZZ\n\n1) Jogar\n2) Rank\n3) Sair\n");
+  return 0;
+}
+
+int exibeTelaSair() {
+  char buf[MAXDATASIZE];
+  printf("\nObrigado por jogar!\n");
   return 0;
 }
 
